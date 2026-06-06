@@ -3,6 +3,7 @@ import { PrismaClient, OrderStatus, TableStatus, PaymentMethod } from "@prisma/c
 import { z } from "zod";
 import { apiKeyMiddleware } from "../middleware/apiKeyMiddleware";
 import { clientOrAdminAuth } from "../middleware/clientOrAdminAuth";
+import { transitionTableStatus } from "./tables";
 
 const prisma = new PrismaClient();
 const router = Router();
@@ -475,13 +476,12 @@ router.post("/orders/:id/pay", clientOrAdminAuth, async (req: Request, res: Resp
         },
       });
 
-      // 5. Update Table Status to empty
+      // 5. Ensure Table Status remains bill during transaction
       if (order.tableId) {
         await tx.table.update({
           where: { id: order.tableId },
           data: {
-            status: TableStatus.empty,
-            currentOrderId: null,
+            status: TableStatus.bill,
           },
         });
       }
@@ -497,6 +497,11 @@ router.post("/orders/:id/pay", clientOrAdminAuth, async (req: Request, res: Resp
 
       return inv;
     });
+
+    // If UPI/Card payment, transition table to paid (starts 5-minute grace period)
+    if (order.tableId && (body.paymentMethod === PaymentMethod.upi || body.paymentMethod === PaymentMethod.card)) {
+      await transitionTableStatus(order.tableId, TableStatus.paid, req);
+    }
 
     emitTableUpdate(req);
     emitOrderUpdate(req);

@@ -259,6 +259,21 @@ function DashboardView({ fetchWithAuth }: { fetchWithAuth: any }) {
   const [tables, setTables] = useState<any[]>([]);
   const socketRef = useRef<Socket | null>(null);
 
+  // Modal / Table control states
+  const [selectedTable, setSelectedTable] = useState<any | null>(null);
+  const [tableOrder, setTableOrder] = useState<any | null>(null);
+  const [loadingOrder, setLoadingOrder] = useState(false);
+  const [paymentMethod, setPaymentMethod] = useState("cash");
+  const [processing, setProcessing] = useState(false);
+  const [modalError, setModalError] = useState("");
+
+  const STATUS_LABELS: Record<string, string> = {
+    empty: "Empty",
+    active: "Active",
+    bill: "Bill Prepared",
+    paid: "Bill Paid"
+  };
+
   const loadData = async () => {
     try {
       const pulseRes = await fetchWithAuth("/api/admin/reports/sales-pulse");
@@ -267,6 +282,137 @@ function DashboardView({ fetchWithAuth }: { fetchWithAuth: any }) {
       const tablesRes = await fetchWithAuth("/api/tables");
       if (tablesRes.ok) setTables(await tablesRes.json());
     } catch (err) {}
+  };
+
+  const handleTableClick = async (table: any) => {
+    setSelectedTable(table);
+    setModalError("");
+    setTableOrder(null);
+    setPaymentMethod("cash");
+    if (table.currentOrderId) {
+      setLoadingOrder(true);
+      try {
+        const res = await fetchWithAuth(`/api/orders/${table.currentOrderId}`);
+        if (res.ok) {
+          setTableOrder(await res.json());
+        }
+      } catch (err) {
+        console.error("Failed to load table order details:", err);
+      } finally {
+        setLoadingOrder(false);
+      }
+    }
+  };
+
+  const handleOpenOrder = async () => {
+    setProcessing(true);
+    setModalError("");
+    try {
+      const res = await fetchWithAuth("/api/orders", {
+        method: "POST",
+        body: JSON.stringify({ tableId: selectedTable.id, guests: 4 }),
+      });
+      if (res.ok) {
+        setSelectedTable(null);
+        loadData();
+      } else {
+        const errData = await res.json();
+        setModalError(errData.error || "Failed to open order.");
+      }
+    } catch (err: any) {
+      setModalError(err.message || "Failed to open order.");
+    } finally {
+      setProcessing(false);
+    }
+  };
+
+  const handlePrepareBill = async () => {
+    if (!selectedTable.currentOrderId) return;
+    setProcessing(true);
+    setModalError("");
+    try {
+      const res = await fetchWithAuth(`/api/orders/${selectedTable.currentOrderId}/bill`, {
+        method: "POST"
+      });
+      if (res.ok) {
+        setSelectedTable(null);
+        loadData();
+      } else {
+        const errData = await res.json();
+        setModalError(errData.error || "Failed to prepare bill.");
+      }
+    } catch (err: any) {
+      setModalError(err.message || "Failed to prepare bill.");
+    } finally {
+      setProcessing(false);
+    }
+  };
+
+  const handleCheckoutOrder = async () => {
+    if (!selectedTable.currentOrderId) return;
+    setProcessing(true);
+    setModalError("");
+    try {
+      const res = await fetchWithAuth(`/api/orders/${selectedTable.currentOrderId}/pay`, {
+        method: "POST",
+        body: JSON.stringify({ paymentMethod }),
+      });
+      if (res.ok) {
+        setSelectedTable(null);
+        loadData();
+      } else {
+        const errData = await res.json();
+        setModalError(errData.error || "Failed to checkout order.");
+      }
+    } catch (err: any) {
+      setModalError(err.message || "Failed to checkout order.");
+    } finally {
+      setProcessing(false);
+    }
+  };
+
+  const handleConfirmPaid = async () => {
+    setProcessing(true);
+    setModalError("");
+    try {
+      const res = await fetchWithAuth(`/api/tables/${selectedTable.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ status: "paid" }),
+      });
+      if (res.ok) {
+        setSelectedTable(null);
+        loadData();
+      } else {
+        const errData = await res.json();
+        setModalError(errData.error || "Failed to transition table status.");
+      }
+    } catch (err: any) {
+      setModalError(err.message || "Failed to transition table status.");
+    } finally {
+      setProcessing(false);
+    }
+  };
+
+  const handleClearTable = async () => {
+    setProcessing(true);
+    setModalError("");
+    try {
+      const res = await fetchWithAuth(`/api/tables/${selectedTable.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ status: "empty" }),
+      });
+      if (res.ok) {
+        setSelectedTable(null);
+        loadData();
+      } else {
+        const errData = await res.json();
+        setModalError(errData.error || "Failed to clear table.");
+      }
+    } catch (err: any) {
+      setModalError(err.message || "Failed to clear table.");
+    } finally {
+      setProcessing(false);
+    }
   };
 
   useEffect(() => {
@@ -323,10 +469,15 @@ function DashboardView({ fetchWithAuth }: { fetchWithAuth: any }) {
       
       <div className="room-grid">
         {tables.map((table) => (
-          <div key={table.id} className={`card table-card ${table.status.toLowerCase()}`}>
+          <div 
+            key={table.id} 
+            className={`card table-card ${table.status.toLowerCase()}`}
+            style={{ cursor: "pointer" }}
+            onClick={() => handleTableClick(table)}
+          >
             <div className="table-header">
               <span className="table-name">{table.name}</span>
-              <span className="table-status-pill">{table.status}</span>
+              <span className="table-status-pill">{STATUS_LABELS[table.status.toLowerCase()] || table.status}</span>
             </div>
             <span className="table-seats">{table.seats} seats</span>
             {table.status !== "empty" && table.currentOrderId && (
@@ -337,6 +488,106 @@ function DashboardView({ fetchWithAuth }: { fetchWithAuth: any }) {
           </div>
         ))}
       </div>
+
+      {/* Table Status Allocator Modal */}
+      {selectedTable && (
+        <div className="modal-overlay">
+          <div className="modal-content" style={{ maxWidth: "450px" }}>
+            <div className="modal-header">
+              <h3>Manage Table: {selectedTable.name}</h3>
+              <button className="btn btn-secondary" style={{ padding: "4px 8px" }} onClick={() => setSelectedTable(null)}>✕</button>
+            </div>
+
+            {modalError && (
+              <div className="alert alert-danger" style={{ marginBottom: "16px", display: "flex", gap: "8px", alignItems: "center" }}>
+                <AlertCircle size={18} />
+                <span>{modalError}</span>
+              </div>
+            )}
+
+            <div style={{ marginBottom: "20px" }}>
+              <div><strong>Current Status:</strong> {STATUS_LABELS[selectedTable.status.toLowerCase()] || selectedTable.status}</div>
+              <div><strong>Capacity:</strong> {selectedTable.seats} seats</div>
+            </div>
+
+            {loadingOrder && (
+              <div style={{ color: "var(--text-muted)", padding: "10px 0" }}>Loading active order details...</div>
+            )}
+
+            {tableOrder && (
+              <div style={{ backgroundColor: "var(--bg-panel-light)", padding: "12px", borderRadius: "var(--radius-sm)", border: "1px solid var(--border-color)", marginBottom: "20px" }}>
+                <h4 style={{ margin: "0 0 8px 0", fontSize: "14px" }}>Active Order: {tableOrder.orderNo}</h4>
+                <div style={{ fontSize: "13px", display: "flex", flexDirection: "column", gap: "4px" }}>
+                  <div>Guests: {tableOrder.guests}</div>
+                  <div>Status: <span style={{ textTransform: "uppercase", fontWeight: 700 }}>{tableOrder.status}</span></div>
+                  <div>Items: {tableOrder.items?.map((it: any) => `${it.qty}x ${it.name}`).join(", ") || "No items"}</div>
+                  <div style={{ fontWeight: 700, marginTop: "4px" }}>Total: ₹{Number(tableOrder.total).toFixed(2)}</div>
+                </div>
+              </div>
+            )}
+
+            <div style={{ display: "flex", flexDirection: "column", gap: "10px", marginTop: "20px" }}>
+              {selectedTable.status === "empty" && (
+                <button className="btn btn-primary" onClick={handleOpenOrder} disabled={processing}>
+                  {processing ? "Opening..." : "Allocate Naming: Active (Open Order)"}
+                </button>
+              )}
+
+              {selectedTable.status === "active" && (
+                <button className="btn btn-primary" onClick={handlePrepareBill} disabled={processing || !selectedTable.currentOrderId}>
+                  {processing ? "Preparing..." : "Allocate Naming: Bill Prepared (Print Bill)"}
+                </button>
+              )}
+
+              {selectedTable.status === "bill" && (
+                <>
+                  {/* If order is already paid (cash checkout done, table status is still bill) */}
+                  {tableOrder && tableOrder.status === "paid" ? (
+                    <button className="btn btn-primary" onClick={handleConfirmPaid} disabled={processing}>
+                      {processing ? "Confirming..." : "Allocate Naming: Bill Paid (Confirm Cash Received)"}
+                    </button>
+                  ) : (
+                    // If order is not paid yet, show payment buttons
+                    <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+                      <div className="form-group" style={{ margin: 0 }}>
+                        <label className="form-label" style={{ fontSize: "12px", marginBottom: "4px" }}>Payment Method</label>
+                        <select 
+                          className="form-input" 
+                          value={paymentMethod} 
+                          onChange={(e) => setPaymentMethod(e.target.value)}
+                        >
+                          <option value="cash">CASH (Keeps table status as 'Bill Prepared')</option>
+                          <option value="upi">UPI (Auto transitions table status to 'Bill Paid')</option>
+                          <option value="card">CARD (Auto transitions table status to 'Bill Paid')</option>
+                          <option value="credit">CREDIT (Keeps table status as 'Bill Prepared')</option>
+                        </select>
+                      </div>
+                      <button className="btn className btn-primary" onClick={handleCheckoutOrder} disabled={processing}>
+                        {processing ? "Checking out..." : "Submit Payment & checkout"}
+                      </button>
+                    </div>
+                  )}
+                </>
+              )}
+
+              {selectedTable.status === "paid" && (
+                <div style={{ textAlign: "center" }}>
+                  <p style={{ fontSize: "12.5px", color: "var(--text-muted)", marginBottom: "12px" }}>
+                    ℹ️ Grace Period active. Table will auto-clear to Empty in 5 minutes.
+                  </p>
+                  <button className="btn btn-danger" style={{ width: "100%" }} onClick={handleClearTable} disabled={processing}>
+                    {processing ? "Clearing..." : "Allocate Naming: Empty (Clear Table Now)"}
+                  </button>
+                </div>
+              )}
+
+              <button className="btn btn-secondary" onClick={() => setSelectedTable(null)}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

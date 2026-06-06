@@ -3,6 +3,7 @@ import { PrismaClient, TableStatus } from "@prisma/client";
 import { z } from "zod";
 import { apiKeyMiddleware } from "../middleware/apiKeyMiddleware";
 import { adminAuthMiddleware, AuthenticatedRequest } from "../middleware/adminAuthMiddleware";
+import { clientOrAdminAuth } from "../middleware/clientOrAdminAuth";
 
 const prisma = new PrismaClient();
 const router = Router();
@@ -23,6 +24,128 @@ const adminUpdateTableSchema = z.object({
   status: z.nativeEnum(TableStatus).optional(),
 });
 
+// Global map to track active timers to prevent duplicates or allow clearing/rescheduling
+export const activeTimers = new Map<number, NodeJS.Timeout>();
+
+export async function transitionTableStatus(tableId: number, nextStatus: TableStatus, req?: Request) {
+  // Fetch table
+  const table = await prisma.table.findUnique({ where: { id: tableId } });
+  if (!table) throw new Error("Table not found");
+
+  const currentStatus = table.status;
+  if (currentStatus === nextStatus) return table;
+
+  // Validate lifecycle transition
+  const ALLOWED_TRANSITIONS: Record<TableStatus, TableStatus[]> = {
+    empty: ["active"],
+    active: ["bill"],
+    bill: ["paid"],
+    paid: ["empty"]
+  };
+
+  if (!ALLOWED_TRANSITIONS[currentStatus].includes(nextStatus)) {
+    throw new Error(`Invalid table status transition from ${currentStatus} to ${nextStatus}.`);
+  }
+
+  // Clear any existing timer for this table if transitioning away from paid manually
+  if (activeTimers.has(tableId)) {
+    clearTimeout(activeTimers.get(tableId)!);
+    activeTimers.delete(tableId);
+  }
+
+  // Determine updates
+  let currentOrderId = table.currentOrderId;
+  if (nextStatus === TableStatus.empty) {
+    currentOrderId = null;
+  }
+
+  // Perform update
+  const updatedTable = await prisma.table.update({
+    where: { id: tableId },
+    data: {
+      status: nextStatus,
+      currentOrderId,
+    },
+  });
+
+  // Schedule timer if nextStatus is paid
+  if (nextStatus === TableStatus.paid) {
+    const timer = setTimeout(async () => {
+      try {
+        await transitionTableStatus(tableId, TableStatus.empty);
+        // Broadcast updates using socket.io if we can find it
+        const io = req?.app.get("io") || (global as any).io;
+        if (io) {
+          io.emit("table-update");
+          io.emit("order-update");
+        }
+      } catch (err) {
+        console.error(`Error auto-clearing table ${tableId}:`, err);
+      }
+    }, 5 * 60 * 1000); // 5 minutes
+    
+    activeTimers.set(tableId, timer);
+  }
+
+  return updatedTable;
+}
+
+export async function initTableTimers(io?: any) {
+  // Store io globally if needed for backup
+  (global as any).io = io;
+  try {
+    const paidTables = await prisma.table.findMany({
+      where: { status: TableStatus.paid }
+    });
+
+    for (const table of paidTables) {
+      const elapsedMs = Date.now() - new Date(table.updatedAt).getTime();
+      const gracePeriodMs = 5 * 60 * 1000;
+
+      if (activeTimers.has(table.id)) {
+        clearTimeout(activeTimers.get(table.id)!);
+      }
+
+      if (elapsedMs >= gracePeriodMs) {
+        // Clear immediately
+        await prisma.table.update({
+          where: { id: table.id },
+          data: {
+            status: TableStatus.empty,
+            currentOrderId: null,
+          }
+        });
+        console.log(`Auto-cleared table T${table.id} on startup (elapsed ${Math.round(elapsedMs / 1000)}s)`);
+      } else {
+        const remainingMs = gracePeriodMs - elapsedMs;
+        console.log(`Scheduling auto-clear for table T${table.id} in ${Math.round(remainingMs / 1000)}s`);
+        
+        const timer = setTimeout(async () => {
+          try {
+            await prisma.table.update({
+              where: { id: table.id },
+              data: {
+                status: TableStatus.empty,
+                currentOrderId: null,
+              }
+            });
+            if (io) {
+              io.emit("table-update");
+              io.emit("order-update");
+            }
+          } catch (err) {
+            console.error(`Error auto-clearing table ${table.id} from startup timer:`, err);
+          }
+        }, remainingMs);
+
+        activeTimers.set(table.id, timer);
+      }
+    }
+  } catch (err) {
+    console.error("Error initializing table timers on startup:", err);
+  }
+}
+
 // Helper to broadcast table updates
 function broadcastTableUpdate(req: Request) {
   const io = req.app.get("io");
@@ -42,7 +165,7 @@ function broadcastTableUpdate(req: Request) {
  *       200:
  *         description: List of tables
  */
-router.get("/tables", apiKeyMiddleware, async (req: Request, res: Response) => {
+router.get("/tables", clientOrAdminAuth, async (req: Request, res: Response) => {
   try {
     const tables = await prisma.table.findMany({
       orderBy: { id: "asc" },
@@ -84,7 +207,7 @@ router.get("/tables", apiKeyMiddleware, async (req: Request, res: Response) => {
  *       200:
  *         description: Table updated
  */
-router.patch("/tables/:id", apiKeyMiddleware, async (req: Request, res: Response) => {
+router.patch("/tables/:id", clientOrAdminAuth, async (req: Request, res: Response) => {
   const tableId = parseInt(req.params.id, 10);
   if (isNaN(tableId)) {
     return res.status(400).json({ error: "Invalid table ID" });
@@ -92,22 +215,27 @@ router.patch("/tables/:id", apiKeyMiddleware, async (req: Request, res: Response
 
   try {
     const body = updateTableSchema.parse(req.body);
+    if (body.status) {
+      const table = await transitionTableStatus(tableId, body.status, req);
+      broadcastTableUpdate(req);
+      return res.json(table);
+    }
+
     const table = await prisma.table.update({
       where: { id: tableId },
       data: {
-        ...(body.status !== undefined && { status: body.status }),
         ...(body.currentOrderId !== undefined && { currentOrderId: body.currentOrderId }),
       },
     });
 
     broadcastTableUpdate(req);
     return res.json(table);
-  } catch (error) {
+  } catch (error: any) {
     if (error instanceof z.ZodError) {
       return res.status(400).json({ error: error.errors });
     }
     console.error("Update Table Error:", error);
-    return res.status(500).json({ error: "Internal Server Error" });
+    return res.status(400).json({ error: error.message || "Invalid transition" });
   }
 });
 

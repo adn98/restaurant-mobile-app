@@ -12,7 +12,7 @@ import * as dotenv from "dotenv";
 dotenv.config();
 
 import authRouter from "./routes/auth";
-import tablesRouter from "./routes/tables";
+import tablesRouter, { initTableTimers } from "./routes/tables";
 import menuRouter from "./routes/menu";
 import ordersRouter from "./routes/orders";
 import reportsRouter from "./routes/reports";
@@ -31,6 +31,7 @@ const io = new Server(server, {
 });
 
 app.set("io", io);
+initTableTimers(io);
 
 // Global Middleware
 app.use(cors({

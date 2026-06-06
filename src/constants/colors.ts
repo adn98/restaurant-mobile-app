@@ -50,14 +50,14 @@ export const TABLE_STATUS_COLORS: Record<
     bg: COLORS.blueLight,
     fg: COLORS.blue,
     bd: COLORS.blue,
-    label: "Bill Ready",
+    label: "Bill Prepared",
     dot: COLORS.blue,
   },
   paid: {
     bg: "#F1F5F9",
     fg: COLORS.slate,
     bd: COLORS.gray,
-    label: "Paid",
+    label: "Bill Paid",
     dot: COLORS.gray,
   },
 };

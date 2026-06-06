@@ -930,80 +930,332 @@ function MenuView({ fetchWithAuth }: { fetchWithAuth: any }) {
   );
 }
 
-// 4. INVOICES HISTORY VIEW
+// 4. INVOICES / OPEN ORDERS VIEW
 function InvoicesView({ fetchWithAuth }: { fetchWithAuth: any }) {
-  const [invoices, setInvoices] = useState<any[]>([]);
+  const [activeTab, setActiveTab] = useState<"orders" | "history">("orders");
+  const [invoices, setInvoices] = useState<any[]>([]); // Invoice History (Paid)
+  const [openOrders, setOpenOrders] = useState<any[]>([]); // Open Orders (Unpaid)
+  const [tables, setTables] = useState<any[]>([]);
+  const [categories, setCategories] = useState<any[]>([]);
+  const [menuItems, setMenuItems] = useState<any[]>([]);
   const [search, setSearch] = useState("");
   const [selectedInvoice, setSelectedInvoice] = useState<any | null>(null);
 
-  // States for Create Invoice modal
+  // Modals state
   const [showCreateModal, setShowCreateModal] = useState(false);
-  const [unpaidOrders, setUnpaidOrders] = useState<any[]>([]);
-  const [selectedOrderId, setSelectedOrderId] = useState("");
-  const [paymentMethod, setPaymentMethod] = useState("cash");
+  const [showEditModal, setShowEditModal] = useState(false);
+  const [showPayModal, setShowPayModal] = useState(false);
+
+  // Create/Edit Order Builder state
+  const [selectedTableId, setSelectedTableId] = useState<number | "">("");
+  const [guestCount, setGuestCount] = useState<number>(1);
+  const [selectedItems, setSelectedItems] = useState<Record<string, { id: string; name: string; price: number; quantity: number }>>({});
+  const [editingOrder, setEditingOrder] = useState<any | null>(null);
+
+  // Checkout state
+  const [selectedOrderId, setSelectedOrderId] = useState<string>("");
+  const [paymentMethod, setPaymentMethod] = useState<string>("cash");
+
+  // UX states
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
+  const [activeCategory, setActiveCategory] = useState<string>("all");
+  const [menuSearch, setMenuSearch] = useState("");
 
   const loadData = async () => {
     try {
-      const res = await fetchWithAuth("/api/admin/invoices");
-      if (res.ok) setInvoices(await res.json());
-    } catch (e) {}
-  };
+      // 1. Fetch History Invoices (Paid)
+      const invRes = await fetchWithAuth("/api/invoices");
+      if (invRes.ok) setInvoices(await invRes.json());
 
-  const loadUnpaidOrders = async () => {
-    try {
-      const res = await fetchWithAuth("/api/orders");
-      if (res.ok) {
-        const allOrders = await res.json();
-        const unpaid = allOrders.filter((o: any) => o.status !== "paid");
-        setUnpaidOrders(unpaid);
-        if (unpaid.length > 0) {
-          setSelectedOrderId(unpaid[0].id);
-        } else {
-          setSelectedOrderId("");
-        }
+      // 2. Fetch Open Orders (Unpaid)
+      const ordRes = await fetchWithAuth("/api/orders");
+      if (ordRes.ok) {
+        const allOrders = await ordRes.json();
+        setOpenOrders(allOrders.filter((o: any) => o.status !== "paid"));
       }
-    } catch (err) {
-      console.error("Failed to load unpaid orders:", err);
+
+      // 3. Fetch Tables
+      const tblRes = await fetchWithAuth("/api/tables");
+      if (tblRes.ok) setTables(await tblRes.json());
+    } catch (e) {
+      console.error("Failed to load billing view data:", e);
     }
   };
 
-  useEffect(() => { loadData(); }, []);
+  const loadMenuAndCategories = async () => {
+    try {
+      const catRes = await fetchWithAuth("/api/categories");
+      if (catRes.ok) setCategories(await catRes.json());
+
+      const menuRes = await fetchWithAuth("/api/menu");
+      if (menuRes.ok) setMenuItems(await menuRes.json());
+    } catch (e) {
+      console.error("Failed to load menu data:", e);
+    }
+  };
 
   useEffect(() => {
-    if (showCreateModal) {
-      loadUnpaidOrders();
-      setError("");
-    }
-  }, [showCreateModal]);
+    loadData();
+    loadMenuAndCategories();
 
-  const handleCreateInvoice = async (e: React.FormEvent) => {
+    // Listen to real-time events to auto-update view
+    const socket = io(API_BASE);
+    socket.on("table-update", () => loadData());
+    socket.on("order-update", () => loadData());
+    socket.on("sales-update", () => loadData());
+
+    return () => {
+      socket.disconnect();
+    };
+  }, []);
+
+  // Item Builder Handlers
+  const addItem = (item: any) => {
+    setSelectedItems(prev => {
+      if (prev[item.id]) {
+        return {
+          ...prev,
+          [item.id]: {
+            ...prev[item.id],
+            quantity: prev[item.id].quantity + 1
+          }
+        };
+      }
+      return {
+        ...prev,
+        [item.id]: {
+          id: item.id,
+          name: item.name,
+          price: Number(item.price),
+          quantity: 1
+        }
+      };
+    });
+  };
+
+  const increaseQty = (itemId: string) => {
+    setSelectedItems(prev => {
+      if (!prev[itemId]) return prev;
+      return {
+        ...prev,
+        [itemId]: {
+          ...prev[itemId],
+          quantity: prev[itemId].quantity + 1
+        }
+      };
+    });
+  };
+
+  const decreaseQty = (itemId: string) => {
+    setSelectedItems(prev => {
+      if (!prev[itemId]) return prev;
+      const newQty = prev[itemId].quantity - 1;
+      const updated = { ...prev };
+      if (newQty <= 0) {
+        delete updated[itemId];
+      } else {
+        updated[itemId] = {
+          ...prev[itemId],
+          quantity: newQty
+        };
+      }
+      return updated;
+    });
+  };
+
+  const removeItem = (itemId: string) => {
+    setSelectedItems(prev => {
+      const updated = { ...prev };
+      delete updated[itemId];
+      return updated;
+    });
+  };
+
+  const calculateTotals = () => {
+    let subtotal = 0;
+    Object.values(selectedItems).forEach((it: any) => {
+      subtotal += it.price * it.quantity;
+    });
+    const gst = subtotal * 0.05;
+    const total = subtotal + gst;
+    return { subtotal, gst, total };
+  };
+
+  const totals = calculateTotals();
+
+  // Create Order Submission
+  const handleCreateOrder = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!selectedOrderId) {
-      setError("Please select an active order.");
+    if (!selectedTableId) {
+      setError("Please select a dining table.");
       return;
     }
+
+    const itemsPayload = Object.values(selectedItems).map((it: any) => ({
+      menuItemId: it.id,
+      name: it.name,
+      price: it.price,
+      qty: it.quantity,
+      notes: null
+    }));
+
+    if (itemsPayload.length === 0) {
+      setError("Please select at least one menu item.");
+      return;
+    }
+
     setSubmitting(true);
     setError("");
+
+    try {
+      // Step 1: POST /api/orders
+      const createRes = await fetchWithAuth("/api/orders", {
+        method: "POST",
+        body: JSON.stringify({ tableId: Number(selectedTableId), guests: guestCount }),
+      });
+
+      if (!createRes.ok) {
+        const errData = await createRes.json();
+        throw new Error(errData.error || "Failed to open new order.");
+      }
+
+      const orderData = await createRes.json();
+
+      // Step 2: PUT /api/orders/:id/items
+      const syncRes = await fetchWithAuth(`/api/orders/${orderData.id}/items`, {
+        method: "PUT",
+        body: JSON.stringify({ items: itemsPayload }),
+      });
+
+      if (!syncRes.ok) {
+        const errData = await syncRes.json();
+        throw new Error(errData.error || "Failed to save menu items.");
+      }
+
+      setShowCreateModal(false);
+      setSelectedTableId("");
+      setGuestCount(1);
+      setSelectedItems({});
+      loadData();
+    } catch (err: any) {
+      setError(err.message || "Failed to save order.");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  // Edit Order Submission
+  const handleEditOrder = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingOrder) return;
+
+    const itemsPayload = Object.values(selectedItems).map((it: any) => ({
+      menuItemId: it.id,
+      name: it.name,
+      price: it.price,
+      qty: it.quantity,
+      notes: null
+    }));
+
+    if (itemsPayload.length === 0) {
+      setError("An order must contain at least one item.");
+      return;
+    }
+
+    setSubmitting(true);
+    setError("");
+
+    try {
+      const syncRes = await fetchWithAuth(`/api/orders/${editingOrder.id}/items`, {
+        method: "PUT",
+        body: JSON.stringify({ items: itemsPayload }),
+      });
+
+      if (!syncRes.ok) {
+        const errData = await syncRes.json();
+        throw new Error(errData.error || "Failed to sync order items.");
+      }
+
+      setShowEditModal(false);
+      setEditingOrder(null);
+      setSelectedItems({});
+      loadData();
+    } catch (err: any) {
+      setError(err.message || "Failed to save changes.");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  // Generate Bill (billed)
+  const handlePrepareBill = async (orderId: string) => {
+    try {
+      const res = await fetchWithAuth(`/api/orders/${orderId}/bill`, {
+        method: "POST"
+      });
+      if (res.ok) {
+        loadData();
+      } else {
+        const errData = await res.json();
+        alert(errData.error || "Failed to generate bill.");
+      }
+    } catch (err: any) {
+      alert(err.message || "Failed to generate bill.");
+    }
+  };
+
+  // Checkout / Payment Process
+  const handleProcessPayment = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedOrderId) return;
+
+    setSubmitting(true);
+    setError("");
+
     try {
       const res = await fetchWithAuth(`/api/orders/${selectedOrderId}/pay`, {
         method: "POST",
         body: JSON.stringify({ paymentMethod }),
       });
+
       if (res.ok) {
-        setShowCreateModal(false);
+        setShowPayModal(false);
+        setSelectedOrderId("");
+        setPaymentMethod("cash");
         loadData();
       } else {
         const errData = await res.json();
-        setError(errData.error || "Failed to create invoice.");
+        setError(errData.error || "Failed to checkout.");
       }
     } catch (err: any) {
-      setError(err.message || "Something went wrong.");
+      setError(err.message || "Failed to checkout.");
     } finally {
       setSubmitting(false);
     }
   };
+
+  // Filter tables where status === empty
+  const emptyTables = tables.filter((t: any) => t.status === "empty");
+
+  // Filter menu items by search and category selection
+  const filteredMenuItems = menuItems.filter(item => {
+    const matchesSearch = item.name.toLowerCase().includes(menuSearch.toLowerCase());
+    const matchesCategory = activeCategory === "all" || item.categoryId === activeCategory;
+    return matchesSearch && matchesCategory;
+  });
+
+  const getTableName = (tableId: number) => {
+    const t = tables.find(tbl => tbl.id === tableId);
+    return t ? t.name : `T${tableId}`;
+  };
+
+  // Search filter for Lists
+  const filteredOpenOrders = openOrders.filter(ord => {
+    const tableName = getTableName(ord.tableId);
+    return ord.orderNo.toLowerCase().includes(search.toLowerCase()) ||
+           tableName.toLowerCase().includes(search.toLowerCase());
+  });
 
   const filteredInvoices = invoices.filter(inv => 
     inv.orderNo.toLowerCase().includes(search.toLowerCase()) ||
@@ -1011,60 +1263,556 @@ function InvoicesView({ fetchWithAuth }: { fetchWithAuth: any }) {
   );
 
   return (
-    <div className="card">
-      <div className="section-header" style={{ marginBottom: "20px" }}>
-        <h4>Billing Invoice Records</h4>
-        <div style={{ display: "flex", gap: "10px", alignItems: "center" }}>
-          <button className="btn btn-primary" onClick={() => setShowCreateModal(true)}>
-            <Plus size={16} /> Create Invoice
-          </button>
-          <div style={{ display: "flex", alignItems: "center", backgroundColor: "var(--bg-panel-light)", padding: "8px 16px", borderRadius: "var(--radius-sm)", border: "1px solid var(--border-color)", width: "300px" }}>
-            <Search size={16} style={{ color: "var(--text-muted)", marginRight: "10px" }} />
-            <input
-              type="text"
-              placeholder="Search Order No / Invoice..."
-              style={{ background: "none", border: "none", outline: "none", width: "100%", color: "var(--text-main)" }}
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-            />
-          </div>
-        </div>
+    <div>
+      {/* Tabs System */}
+      <div className="tabs-header" style={{ marginBottom: "20px" }}>
+        <button className={`tab-btn ${activeTab === "orders" ? "active" : ""}`} onClick={() => { setActiveTab("orders"); setSearch(""); }}>
+          Open Orders
+        </button>
+        <button className={`tab-btn ${activeTab === "history" ? "active" : ""}`} onClick={() => { setActiveTab("history"); setSearch(""); }}>
+          Invoice History
+        </button>
       </div>
 
-      <div className="table-wrapper">
-        <table className="custom-table">
-          <thead>
-            <tr>
-              <th>Invoice Number</th>
-              <th>Order Number</th>
-              <th>Table</th>
-              <th>Total Amount</th>
-              <th>Payment Method</th>
-              <th>Checkout Date</th>
-              <th>Details</th>
-            </tr>
-          </thead>
-          <tbody>
-            {filteredInvoices.map((inv) => (
-              <tr key={inv.id}>
-                <td style={{ fontWeight: 700, color: "var(--color-primary-light)" }}>{inv.invoiceNo}</td>
-                <td>{inv.orderNo}</td>
-                <td>T{inv.tableId}</td>
-                <td style={{ fontWeight: 700 }}>₹{Number(inv.total).toFixed(2)}</td>
-                <td>
-                  <span className="table-status-pill bill">{inv.paymentMethod.toUpperCase()}</span>
-                </td>
-                <td>{new Date(inv.createdAt).toLocaleString("en-IN")}</td>
-                <td>
-                  <button className="btn btn-secondary" style={{ padding: "6px 12px", fontSize: "13px" }} onClick={() => setSelectedInvoice(inv)}>
-                    View Receipt
-                  </button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+      {activeTab === "orders" ? (
+        <div className="card">
+          <div className="section-header" style={{ marginBottom: "20px" }}>
+            <h4>Active & Billed Orders</h4>
+            <div style={{ display: "flex", gap: "10px", alignItems: "center" }}>
+              <button className="btn btn-primary" onClick={() => { setShowCreateModal(true); setError(""); setSelectedItems({}); setSelectedTableId(""); setGuestCount(1); }}>
+                <Plus size={16} /> Create Order
+              </button>
+              <div style={{ display: "flex", alignItems: "center", backgroundColor: "var(--bg-panel-light)", padding: "8px 16px", borderRadius: "var(--radius-sm)", border: "1px solid var(--border-color)", width: "300px" }}>
+                <Search size={16} style={{ color: "var(--text-muted)", marginRight: "10px" }} />
+                <input
+                  type="text"
+                  placeholder="Search Table / Order No..."
+                  style={{ background: "none", border: "none", outline: "none", width: "100%", color: "var(--text-main)" }}
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                />
+              </div>
+            </div>
+          </div>
+
+          <div className="table-wrapper">
+            <table className="custom-table">
+              <thead>
+                <tr>
+                  <th>Table</th>
+                  <th>Order Number</th>
+                  <th>Guests</th>
+                  <th>Items Summary</th>
+                  <th>Total Amount</th>
+                  <th>Opened At</th>
+                  <th>Status</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {filteredOpenOrders.length === 0 ? (
+                  <tr>
+                    <td colSpan={8} style={{ textAlign: "center", color: "var(--text-muted)", padding: "20px 0" }}>No open orders.</td>
+                  </tr>
+                ) : (
+                  filteredOpenOrders.map((ord) => {
+                    const itemsPreview = ord.items?.map((it: any) => `${it.qty}x ${it.name}`).join(", ") || "No items";
+                    return (
+                      <tr key={ord.id}>
+                        <td style={{ fontWeight: 700 }}>{getTableName(ord.tableId)}</td>
+                        <td>{ord.orderNo}</td>
+                        <td>{ord.guests}</td>
+                        <td style={{ maxWidth: "250px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={itemsPreview}>
+                          {itemsPreview}
+                        </td>
+                        <td style={{ fontWeight: 700 }}>₹{Number(ord.total).toFixed(2)}</td>
+                        <td>{new Date(ord.openedAt).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" })}</td>
+                        <td>
+                          <span className={`table-status-pill ${ord.status === "billed" ? "bill" : "active"}`}>
+                            {ord.status.toUpperCase()}
+                          </span>
+                        </td>
+                        <td>
+                          <div style={{ display: "flex", gap: "8px" }}>
+                            <button className="btn btn-secondary" style={{ padding: "6px 12px", fontSize: "12px" }} onClick={() => {
+                              const initialItems: Record<string, any> = {};
+                              ord.items?.forEach((it: any) => {
+                                initialItems[it.menuItemId] = {
+                                  id: it.menuItemId,
+                                  name: it.name,
+                                  price: Number(it.price),
+                                  quantity: it.qty
+                                };
+                              });
+                              setSelectedItems(initialItems);
+                              setEditingOrder(ord);
+                              setShowEditModal(true);
+                              setError("");
+                            }}>
+                              Edit Items
+                            </button>
+                            {ord.status !== "billed" ? (
+                              <button className="btn btn-secondary" style={{ padding: "6px 12px", fontSize: "12px", color: "var(--color-primary-light)" }} onClick={() => handlePrepareBill(ord.id)}>
+                                Prepare Bill
+                              </button>
+                            ) : (
+                              <button className="btn btn-primary" style={{ padding: "6px 12px", fontSize: "12px" }} onClick={() => {
+                                setSelectedOrderId(ord.id);
+                                setPaymentMethod("cash");
+                                setShowPayModal(true);
+                                setError("");
+                              }}>
+                                Checkout
+                              </button>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      ) : (
+        <div className="card">
+          <div className="section-header" style={{ marginBottom: "20px" }}>
+            <h4>Billing History (Paid Invoices)</h4>
+            <div style={{ display: "flex", alignItems: "center", backgroundColor: "var(--bg-panel-light)", padding: "8px 16px", borderRadius: "var(--radius-sm)", border: "1px solid var(--border-color)", width: "300px" }}>
+              <Search size={16} style={{ color: "var(--text-muted)", marginRight: "10px" }} />
+              <input
+                type="text"
+                placeholder="Search Invoice / Order No..."
+                style={{ background: "none", border: "none", outline: "none", width: "100%", color: "var(--text-main)" }}
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+              />
+            </div>
+          </div>
+
+          <div className="table-wrapper">
+            <table className="custom-table">
+              <thead>
+                <tr>
+                  <th>Invoice Number</th>
+                  <th>Order Number</th>
+                  <th>Table</th>
+                  <th>Total Amount</th>
+                  <th>Payment Method</th>
+                  <th>Checkout Date</th>
+                  <th>Details</th>
+                </tr>
+              </thead>
+              <tbody>
+                {filteredInvoices.length === 0 ? (
+                  <tr>
+                    <td colSpan={7} style={{ textAlign: "center", color: "var(--text-muted)", padding: "20px 0" }}>No invoices found.</td>
+                  </tr>
+                ) : (
+                  filteredInvoices.map((inv) => (
+                    <tr key={inv.id}>
+                      <td style={{ fontWeight: 700, color: "var(--color-primary-light)" }}>{inv.invoiceNo}</td>
+                      <td>{inv.orderNo}</td>
+                      <td>{getTableName(inv.tableId)}</td>
+                      <td style={{ fontWeight: 700 }}>₹{Number(inv.total).toFixed(2)}</td>
+                      <td>
+                        <span className="table-status-pill bill">{inv.paymentMethod.toUpperCase()}</span>
+                      </td>
+                      <td>{new Date(inv.createdAt).toLocaleString("en-IN")}</td>
+                      <td>
+                        <button className="btn btn-secondary" style={{ padding: "6px 12px", fontSize: "13px" }} onClick={() => setSelectedInvoice(inv)}>
+                          View Receipt
+                        </button>
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {/* CREATE ORDER MODAL */}
+      {showCreateModal && (
+        <div className="modal-overlay">
+          <div className="modal-content" style={{ maxWidth: "850px", width: "95%" }}>
+            <div className="modal-header">
+              <h3>Create Open Order</h3>
+              <button className="btn btn-secondary" style={{ padding: "4px 8px" }} onClick={() => setShowCreateModal(false)}>✕</button>
+            </div>
+
+            {error && (
+              <div className="alert alert-danger" style={{ marginBottom: "16px", display: "flex", gap: "8px", alignItems: "center" }}>
+                <AlertCircle size={18} />
+                <span>{error}</span>
+              </div>
+            )}
+
+            <form onSubmit={handleCreateOrder}>
+              <div style={{ display: "flex", gap: "24px", flexDirection: "row", flexWrap: "wrap", minHeight: "450px" }}>
+                
+                {/* Left Side: Menu Item Catalog Selector */}
+                <div style={{ flex: 1.2, borderRight: "1px solid var(--border-color)", paddingRight: "20px", minWidth: "320px" }}>
+                  <h4 style={{ margin: "0 0 12px 0", fontSize: "14px" }}>Menu Catalog</h4>
+                  
+                  {/* Search and Category filters */}
+                  <div style={{ display: "flex", gap: "8px", marginBottom: "12px" }}>
+                    <div style={{ display: "flex", alignItems: "center", backgroundColor: "var(--bg-panel-light)", padding: "6px 12px", borderRadius: "var(--radius-sm)", border: "1px solid var(--border-color)", width: "100%" }}>
+                      <Search size={14} style={{ color: "var(--text-muted)", marginRight: "8px" }} />
+                      <input
+                        type="text"
+                        placeholder="Search menu..."
+                        style={{ background: "none", border: "none", outline: "none", width: "100%", color: "var(--text-main)", fontSize: "13px" }}
+                        value={menuSearch}
+                        onChange={(e) => setMenuSearch(e.target.value)}
+                      />
+                    </div>
+                  </div>
+
+                  <div style={{ display: "flex", gap: "6px", overflowX: "auto", paddingBottom: "8px", marginBottom: "12px", borderBottom: "1px solid var(--border-color)" }}>
+                    <button
+                      type="button"
+                      className={`btn ${activeCategory === "all" ? "btn-primary" : "btn-secondary"}`}
+                      style={{ padding: "4px 10px", fontSize: "11px", whiteSpace: "nowrap" }}
+                      onClick={() => setActiveCategory("all")}
+                    >
+                      All
+                    </button>
+                    {categories.map((c) => (
+                      <button
+                        type="button"
+                        key={c.id}
+                        className={`btn ${activeCategory === c.id ? "btn-primary" : "btn-secondary"}`}
+                        style={{ padding: "4px 10px", fontSize: "11px", whiteSpace: "nowrap" }}
+                        onClick={() => setActiveCategory(c.id)}
+                      >
+                        {c.icon} {c.name}
+                      </button>
+                    ))}
+                  </div>
+
+                  {/* Menu Items List */}
+                  <div style={{ display: "flex", flexDirection: "column", gap: "8px", maxHeight: "330px", overflowY: "auto", paddingRight: "4px" }}>
+                    {filteredMenuItems.length === 0 ? (
+                      <div style={{ color: "var(--text-muted)", padding: "20px 0", textAlign: "center", fontSize: "13px" }}>No items found.</div>
+                    ) : (
+                      filteredMenuItems.map((item) => {
+                        const qty = selectedItems[item.id]?.quantity || 0;
+                        return (
+                          <div key={item.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 10px", backgroundColor: "var(--bg-panel-light)", borderRadius: "6px", border: "1px solid var(--border-color)" }}>
+                            <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+                              <span style={{ fontSize: "18px" }}>{item.emoji || "🍽"}</span>
+                              <div>
+                                <div style={{ fontWeight: 600, fontSize: "13px" }}>{item.name}</div>
+                                <div style={{ fontSize: "11px", color: "var(--text-muted)" }}>₹{Number(item.price).toFixed(2)}</div>
+                              </div>
+                            </div>
+                            <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                              {qty > 0 ? (
+                                <>
+                                  <button type="button" className="btn btn-secondary" style={{ padding: "2px 6px", fontSize: "11px", minWidth: "24px" }} onClick={() => decreaseQty(item.id)}>-</button>
+                                  <span style={{ fontWeight: 700, minWidth: "16px", textAlign: "center", fontSize: "13px" }}>{qty}</span>
+                                  <button type="button" className="btn btn-secondary" style={{ padding: "2px 6px", fontSize: "11px", minWidth: "24px" }} onClick={() => increaseQty(item.id)}>+</button>
+                                </>
+                              ) : (
+                                <button type="button" className="btn btn-primary" style={{ padding: "4px 10px", fontSize: "11px" }} onClick={() => addItem(item)}>Add</button>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })
+                    )}
+                  </div>
+                </div>
+
+                {/* Right Side: Configuration & Invoice Totals */}
+                <div style={{ flex: 1, display: "flex", flexDirection: "column", justifyContent: "space-between", minWidth: "280px" }}>
+                  <div>
+                    <h4 style={{ margin: "0 0 12px 0", fontSize: "14px" }}>Order Specifications</h4>
+                    
+                    <div className="form-group" style={{ marginBottom: "12px" }}>
+                      <label className="form-label" style={{ fontSize: "12px", marginBottom: "4px" }}>Select Table (Empty Only)</label>
+                      {emptyTables.length === 0 ? (
+                        <div style={{ color: "var(--color-danger-light)", fontSize: "12.5px", padding: "6px 0" }}>⚠️ No empty tables available. Clear a table first.</div>
+                      ) : (
+                        <select className="form-input" style={{ padding: "8px", fontSize: "13px" }} value={selectedTableId} onChange={(e) => setSelectedTableId(Number(e.target.value) || "")} required>
+                          <option value="">-- Choose Empty Table --</option>
+                          {emptyTables.map((t) => (
+                            <option key={t.id} value={t.id}>{t.name} ({t.seats} seats)</option>
+                          ))}
+                        </select>
+                      )}
+                    </div>
+
+                    <div className="form-group" style={{ marginBottom: "16px" }}>
+                      <label className="form-label" style={{ fontSize: "12px", marginBottom: "4px" }}>Guest Count</label>
+                      <input type="number" min="1" className="form-input" style={{ padding: "8px", fontSize: "13px" }} value={guestCount} onChange={(e) => setGuestCount(Number(e.target.value) || 1)} required />
+                    </div>
+
+                    {/* Selected summary */}
+                    <div style={{ borderTop: "1px solid var(--border-color)", paddingTop: "12px", marginBottom: "12px" }}>
+                      <h5 style={{ margin: "0 0 8px 0", fontSize: "13px", color: "var(--text-muted)" }}>Invoice Summary</h5>
+                      <div style={{ maxHeight: "150px", overflowY: "auto", display: "flex", flexDirection: "column", gap: "6px" }}>
+                        {Object.values(selectedItems).length === 0 ? (
+                          <div style={{ color: "var(--text-muted)", fontSize: "12px", padding: "10px 0" }}>No items selected yet.</div>
+                        ) : (
+                          Object.values(selectedItems).map((it) => (
+                            <div key={it.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: "12px" }}>
+                              <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>{it.name}</span>
+                              <div style={{ display: "flex", gap: "8px", alignItems: "center", marginLeft: "10px" }}>
+                                <span style={{ color: "var(--text-muted)" }}>{it.quantity}x</span>
+                                <span style={{ fontWeight: 600, minWidth: "50px", textAlign: "right" }}>₹{(it.price * it.quantity).toFixed(2)}</span>
+                                <button type="button" style={{ background: "none", border: "none", color: "var(--color-danger-light)", cursor: "pointer", fontSize: "12px", padding: 0 }} onClick={() => removeItem(it.id)}>✕</button>
+                              </div>
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Calculations and submit */}
+                  <div style={{ borderTop: "1px solid var(--border-color)", paddingTop: "12px" }}>
+                    <div style={{ display: "flex", flexDirection: "column", gap: "4px", fontSize: "12px", marginBottom: "16px" }}>
+                      <div style={{ display: "flex", justifyContent: "space-between" }}>
+                        <span style={{ color: "var(--text-muted)" }}>Subtotal</span>
+                        <span>₹{totals.subtotal.toFixed(2)}</span>
+                      </div>
+                      <div style={{ display: "flex", justifyContent: "space-between" }}>
+                        <span style={{ color: "var(--text-muted)" }}>GST (5%)</span>
+                        <span>₹{totals.gst.toFixed(2)}</span>
+                      </div>
+                      <div style={{ display: "flex", justifyContent: "space-between", fontSize: "14px", fontWeight: "bold", marginTop: "4px", color: "var(--color-primary-light)" }}>
+                        <span>Grand Total</span>
+                        <span>₹{totals.total.toFixed(2)}</span>
+                      </div>
+                    </div>
+
+                    <button
+                      type="submit"
+                      className="btn btn-primary"
+                      style={{ width: "100%", padding: "10px" }}
+                      disabled={submitting || !selectedTableId || Object.keys(selectedItems).length === 0}
+                    >
+                      {submitting ? "Saving Order..." : "Create & Save Order"}
+                    </button>
+                  </div>
+
+                </div>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* EDIT ORDER ITEMS MODAL */}
+      {showEditModal && editingOrder && (
+        <div className="modal-overlay">
+          <div className="modal-content" style={{ maxWidth: "850px", width: "95%" }}>
+            <div className="modal-header">
+              <h3>Edit Items: Order {editingOrder.orderNo} ({getTableName(editingOrder.tableId)})</h3>
+              <button className="btn btn-secondary" style={{ padding: "4px 8px" }} onClick={() => { setShowEditModal(false); setEditingOrder(null); }}>✕</button>
+            </div>
+
+            {error && (
+              <div className="alert alert-danger" style={{ marginBottom: "16px", display: "flex", gap: "8px", alignItems: "center" }}>
+                <AlertCircle size={18} />
+                <span>{error}</span>
+              </div>
+            )}
+
+            <form onSubmit={handleEditOrder}>
+              <div style={{ display: "flex", gap: "24px", flexDirection: "row", flexWrap: "wrap", minHeight: "450px" }}>
+                
+                {/* Left Side: Catalog */}
+                <div style={{ flex: 1.2, borderRight: "1px solid var(--border-color)", paddingRight: "20px", minWidth: "320px" }}>
+                  <h4 style={{ margin: "0 0 12px 0", fontSize: "14px" }}>Menu Catalog</h4>
+                  
+                  {/* Search and Category filters */}
+                  <div style={{ display: "flex", gap: "8px", marginBottom: "12px" }}>
+                    <div style={{ display: "flex", alignItems: "center", backgroundColor: "var(--bg-panel-light)", padding: "6px 12px", borderRadius: "var(--radius-sm)", border: "1px solid var(--border-color)", width: "100%" }}>
+                      <Search size={14} style={{ color: "var(--text-muted)", marginRight: "8px" }} />
+                      <input
+                        type="text"
+                        placeholder="Search menu..."
+                        style={{ background: "none", border: "none", outline: "none", width: "100%", color: "var(--text-main)", fontSize: "13px" }}
+                        value={menuSearch}
+                        onChange={(e) => setMenuSearch(e.target.value)}
+                      />
+                    </div>
+                  </div>
+
+                  <div style={{ display: "flex", gap: "6px", overflowX: "auto", paddingBottom: "8px", marginBottom: "12px", borderBottom: "1px solid var(--border-color)" }}>
+                    <button
+                      type="button"
+                      className={`btn ${activeCategory === "all" ? "btn-primary" : "btn-secondary"}`}
+                      style={{ padding: "4px 10px", fontSize: "11px", whiteSpace: "nowrap" }}
+                      onClick={() => setActiveCategory("all")}
+                    >
+                      All
+                    </button>
+                    {categories.map((c) => (
+                      <button
+                        type="button"
+                        key={c.id}
+                        className={`btn ${activeCategory === c.id ? "btn-primary" : "btn-secondary"}`}
+                        style={{ padding: "4px 10px", fontSize: "11px", whiteSpace: "nowrap" }}
+                        onClick={() => setActiveCategory(c.id)}
+                      >
+                        {c.icon} {c.name}
+                      </button>
+                    ))}
+                  </div>
+
+                  {/* Menu Items */}
+                  <div style={{ display: "flex", flexDirection: "column", gap: "8px", maxHeight: "330px", overflowY: "auto", paddingRight: "4px" }}>
+                    {filteredMenuItems.length === 0 ? (
+                      <div style={{ color: "var(--text-muted)", padding: "20px 0", textAlign: "center", fontSize: "13px" }}>No items found.</div>
+                    ) : (
+                      filteredMenuItems.map((item) => {
+                        const qty = selectedItems[item.id]?.quantity || 0;
+                        return (
+                          <div key={item.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 10px", backgroundColor: "var(--bg-panel-light)", borderRadius: "6px", border: "1px solid var(--border-color)" }}>
+                            <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+                              <span style={{ fontSize: "18px" }}>{item.emoji || "🍽"}</span>
+                              <div>
+                                <div style={{ fontWeight: 600, fontSize: "13px" }}>{item.name}</div>
+                                <div style={{ fontSize: "11px", color: "var(--text-muted)" }}>₹{Number(item.price).toFixed(2)}</div>
+                              </div>
+                            </div>
+                            <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                              {qty > 0 ? (
+                                <>
+                                  <button type="button" className="btn btn-secondary" style={{ padding: "2px 6px", fontSize: "11px", minWidth: "24px" }} onClick={() => decreaseQty(item.id)}>-</button>
+                                  <span style={{ fontWeight: 700, minWidth: "16px", textAlign: "center", fontSize: "13px" }}>{qty}</span>
+                                  <button type="button" className="btn btn-secondary" style={{ padding: "2px 6px", fontSize: "11px", minWidth: "24px" }} onClick={() => increaseQty(item.id)}>+</button>
+                                </>
+                              ) : (
+                                <button type="button" className="btn btn-primary" style={{ padding: "4px 10px", fontSize: "11px" }} onClick={() => addItem(item)}>Add</button>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })
+                    )}
+                  </div>
+                </div>
+
+                {/* Right Side: Selected & Save */}
+                <div style={{ flex: 1, display: "flex", flexDirection: "column", justifyContent: "space-between", minWidth: "280px" }}>
+                  <div>
+                    <h4 style={{ margin: "0 0 12px 0", fontSize: "14px" }}>Active Selection</h4>
+                    <div style={{ fontSize: "12px", color: "var(--text-muted)", marginBottom: "12px" }}>
+                      <span>Editing order specifications for table occupancy. Items are live updated on save.</span>
+                    </div>
+
+                    <div style={{ maxHeight: "250px", overflowY: "auto", display: "flex", flexDirection: "column", gap: "6px", marginBottom: "16px" }}>
+                      {Object.values(selectedItems).length === 0 ? (
+                        <div style={{ color: "var(--text-muted)", fontSize: "12px", padding: "10px 0" }}>No items in order. Select at least one item.</div>
+                      ) : (
+                        Object.values(selectedItems).map((it) => (
+                          <div key={it.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: "12px" }}>
+                            <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>{it.name}</span>
+                            <div style={{ display: "flex", gap: "8px", alignItems: "center", marginLeft: "10px" }}>
+                              <span style={{ color: "var(--text-muted)" }}>{it.quantity}x</span>
+                              <span style={{ fontWeight: 600, minWidth: "50px", textAlign: "right" }}>₹{(it.price * it.quantity).toFixed(2)}</span>
+                              <button type="button" style={{ background: "none", border: "none", color: "var(--color-danger-light)", cursor: "pointer", fontSize: "12px", padding: 0 }} onClick={() => removeItem(it.id)}>✕</button>
+                            </div>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </div>
+
+                  <div style={{ borderTop: "1px solid var(--border-color)", paddingTop: "12px" }}>
+                    <div style={{ display: "flex", flexDirection: "column", gap: "4px", fontSize: "12px", marginBottom: "16px" }}>
+                      <div style={{ display: "flex", justifyContent: "space-between" }}>
+                        <span style={{ color: "var(--text-muted)" }}>Subtotal</span>
+                        <span>₹{totals.subtotal.toFixed(2)}</span>
+                      </div>
+                      <div style={{ display: "flex", justifyContent: "space-between" }}>
+                        <span style={{ color: "var(--text-muted)" }}>GST (5%)</span>
+                        <span>₹{totals.gst.toFixed(2)}</span>
+                      </div>
+                      <div style={{ display: "flex", justifyContent: "space-between", fontSize: "14px", fontWeight: "bold", marginTop: "4px", color: "var(--color-primary-light)" }}>
+                        <span>Grand Total</span>
+                        <span>₹{totals.total.toFixed(2)}</span>
+                      </div>
+                    </div>
+
+                    <button
+                      type="submit"
+                      className="btn btn-primary"
+                      style={{ width: "100%", padding: "10px" }}
+                      disabled={submitting || Object.keys(selectedItems).length === 0}
+                    >
+                      {submitting ? "Saving Changes..." : "Save Changes"}
+                    </button>
+                  </div>
+                </div>
+
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* CHECKOUT MODAL */}
+      {showPayModal && (
+        <div className="modal-overlay">
+          <div className="modal-content" style={{ maxWidth: "450px" }}>
+            <div className="modal-header">
+              <h3>Order Checkout</h3>
+              <button className="btn btn-secondary" style={{ padding: "4px 8px" }} onClick={() => setShowPayModal(false)}>✕</button>
+            </div>
+
+            {error && (
+              <div className="alert alert-danger" style={{ marginBottom: "16px", display: "flex", gap: "8px", alignItems: "center" }}>
+                <AlertCircle size={18} />
+                <span>{error}</span>
+              </div>
+            )}
+
+            <form onSubmit={handleProcessPayment}>
+              <div className="form-group">
+                <label className="form-label" style={{ fontSize: "12px", marginBottom: "4px" }}>Payment Method</label>
+                <select
+                  className="form-input"
+                  value={paymentMethod}
+                  onChange={(e) => setPaymentMethod(e.target.value)}
+                  required
+                >
+                  <option value="cash">CASH</option>
+                  <option value="upi">UPI</option>
+                  <option value="card">CARD</option>
+                  <option value="credit">CREDIT</option>
+                </select>
+              </div>
+
+              <div style={{ marginTop: "20px", display: "flex", gap: "10px" }}>
+                <button
+                  type="submit"
+                  className="btn btn-primary"
+                  style={{ flex: 1, padding: "10px" }}
+                  disabled={submitting}
+                >
+                  {submitting ? "Processing..." : "Process Payment & Close"}
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  style={{ padding: "10px 16px" }}
+                  onClick={() => setShowPayModal(false)}
+                >
+                  Cancel
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
 
       {/* Invoice Detail Modal */}
       {selectedInvoice && (
@@ -1075,7 +1823,6 @@ function InvoicesView({ fetchWithAuth }: { fetchWithAuth: any }) {
               <button className="btn btn-secondary" style={{ padding: "4px 8px" }} onClick={() => setSelectedInvoice(null)}>✕</button>
             </div>
             
-            {/* Receipt style */}
             <div style={{ backgroundColor: "#fff", color: "#000", fontFamily: "monospace", padding: "24px", borderRadius: "8px", boxShadow: "inset 0 0 10px rgba(0,0,0,0.1)" }}>
               <div style={{ textAlign: "center", marginBottom: "16px" }}>
                 <h4 style={{ fontWeight: 800, fontSize: "18px" }}>HOTEL GRAND</h4>
@@ -1086,7 +1833,7 @@ function InvoicesView({ fetchWithAuth }: { fetchWithAuth: any }) {
               <div style={{ fontSize: "13px", display: "flex", flexDirection: "column", gap: "4px" }}>
                 <div><strong>Invoice No:</strong> {selectedInvoice.invoiceNo}</div>
                 <div><strong>Order No:</strong> {selectedInvoice.orderNo}</div>
-                <div><strong>Table:</strong> T{selectedInvoice.tableId}</div>
+                <div><strong>Table:</strong> {getTableName(selectedInvoice.tableId)}</div>
                 <div><strong>Date:</strong> {new Date(selectedInvoice.createdAt).toLocaleString("en-IN")}</div>
                 <div><strong>Paid via:</strong> {selectedInvoice.paymentMethod.toUpperCase()}</div>
               </div>
@@ -1128,74 +1875,6 @@ function InvoicesView({ fetchWithAuth }: { fetchWithAuth: any }) {
             <button className="btn btn-primary" style={{ width: "100%", marginTop: "20px" }} onClick={() => window.print()}>
               Print Receipt
             </button>
-          </div>
-        </div>
-      )}
-
-      {/* Create Invoice Modal */}
-      {showCreateModal && (
-        <div className="modal-overlay">
-          <div className="modal-content" style={{ maxWidth: "450px" }}>
-            <div className="modal-header">
-              <h3>Create Invoice</h3>
-              <button className="btn btn-secondary" style={{ padding: "4px 8px" }} onClick={() => setShowCreateModal(false)}>✕</button>
-            </div>
-            
-            {error && (
-              <div className="alert alert-danger" style={{ marginBottom: "16px", display: "flex", gap: "8px", alignItems: "center" }}>
-                <AlertCircle size={18} />
-                <span>{error}</span>
-              </div>
-            )}
-
-            <form onSubmit={handleCreateInvoice}>
-              <div className="form-group">
-                <label className="form-label">Select Active Order</label>
-                {unpaidOrders.length === 0 ? (
-                  <div style={{ color: "var(--text-muted)", padding: "10px 0" }}>No active/unpaid orders found.</div>
-                ) : (
-                  <select 
-                    className="form-input" 
-                    value={selectedOrderId} 
-                    onChange={(e) => setSelectedOrderId(e.target.value)}
-                    required
-                  >
-                    {unpaidOrders.map((order) => {
-                      const itemsPreview = order.items?.map((it: any) => `${it.qty}x ${it.name}`).join(", ");
-                      return (
-                        <option key={order.id} value={order.id}>
-                          Order {order.orderNo} (T{order.tableId}) - ₹{Number(order.total).toFixed(2)} {itemsPreview ? `[${itemsPreview}]` : ""}
-                        </option>
-                      );
-                    })}
-                  </select>
-                )}
-              </div>
-
-              <div className="form-group" style={{ marginTop: "16px" }}>
-                <label className="form-label">Payment Method</label>
-                <select 
-                  className="form-input" 
-                  value={paymentMethod} 
-                  onChange={(e) => setPaymentMethod(e.target.value)}
-                  required
-                >
-                  <option value="cash">CASH</option>
-                  <option value="upi">UPI</option>
-                  <option value="card">CARD</option>
-                  <option value="credit">CREDIT</option>
-                </select>
-              </div>
-
-              <button 
-                type="submit" 
-                className="btn btn-primary" 
-                style={{ width: "100%", marginTop: "24px" }} 
-                disabled={submitting || unpaidOrders.length === 0}
-              >
-                {submitting ? "Generating Invoice..." : "Generate Invoice & Close Order"}
-              </button>
-            </form>
           </div>
         </div>
       )}

@@ -3,6 +3,7 @@ import { PrismaClient } from "@prisma/client";
 import * as bcrypt from "bcryptjs";
 import * as jwt from "jsonwebtoken";
 import { z } from "zod";
+import { adminAuthMiddleware, AuthenticatedRequest } from "../middleware/adminAuthMiddleware";
 
 const prisma = new PrismaClient();
 const router = Router();
@@ -175,6 +176,70 @@ router.post("/logout", (req: Request, res: Response) => {
     sameSite: "strict",
   });
   return res.json({ message: "Logout successful" });
+});
+
+const registerAdminSchema = z.object({
+  username: z.string().min(3, "Username must be at least 3 characters"),
+  newPassword: z.string().min(6, "Password must be at least 6 characters"),
+  currentAdminPassword: z.string().min(1, "Current password is required"),
+});
+
+router.post("/register-admin", adminAuthMiddleware, async (req: Request, res: Response) => {
+  const authReq = req as AuthenticatedRequest;
+  try {
+    const body = registerAdminSchema.parse(req.body);
+
+    const currentAdmin = await prisma.admin.findUnique({
+      where: { id: authReq.admin?.id },
+    });
+
+    if (!currentAdmin) {
+      return res.status(404).json({ error: "Current admin profile not found" });
+    }
+
+    const isPasswordValid = await bcrypt.compare(body.currentAdminPassword, currentAdmin.passwordHash);
+    if (!isPasswordValid) {
+      return res.status(401).json({ error: "Incorrect current admin password" });
+    }
+
+    const existingAdmin = await prisma.admin.findUnique({
+      where: { username: body.username },
+    });
+    if (existingAdmin) {
+      return res.status(400).json({ error: "Username is already taken" });
+    }
+
+    const passwordHash = await bcrypt.hash(body.newPassword, 10);
+    const newAdmin = await prisma.admin.create({
+      data: {
+        username: body.username,
+        passwordHash,
+      },
+    });
+
+    await prisma.auditLog.create({
+      data: {
+        adminId: currentAdmin.id,
+        action: "ADMIN_CREATED",
+        entityType: "Admin",
+        entityId: newAdmin.id,
+      },
+    });
+
+    return res.status(201).json({
+      message: "New administrator registered successfully",
+      admin: {
+        id: newAdmin.id,
+        username: newAdmin.username,
+      },
+    });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({ error: error.errors });
+    }
+    console.error("Register Admin Error:", error);
+    return res.status(500).json({ error: "Internal Server Error" });
+  }
 });
 
 export default router;

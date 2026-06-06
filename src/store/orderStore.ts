@@ -1,119 +1,123 @@
-import AsyncStorage from "@react-native-async-storage/async-storage";
 import { create } from "zustand";
-import { createJSONStorage, persist } from "zustand/middleware";
-
-import { DEFAULT_ORDERS } from "@/constants/mockData";
-import { calculateOrder } from "@/utils/calculations";
-import { Invoice, MenuItem, Order, OrderItem, PaymentMethod } from "@/types";
+import { Order, Invoice, MenuItem, PaymentMethod, OrderItem } from "@/types";
+import { apiFetch } from "@/utils/api";
 
 interface OrderStore {
   orders: Order[];
   invoices: Invoice[];
-  createOrder: (tableId: number, guests: number) => Order;
-  updateOrderItem: (orderId: string, menuItem: MenuItem, qty: number) => void;
-  generateBill: (orderId: string) => void;
-  closeOrder: (orderId: string, method: PaymentMethod) => Invoice;
+  loading: boolean;
+  fetchOrders: () => Promise<void>;
+  fetchInvoices: () => Promise<void>;
+  createOrder: (tableId: number, guests: number) => Promise<Order>;
+  updateOrderItem: (orderId: string, menuItem: MenuItem, qty: number) => Promise<void>;
+  generateBill: (orderId: string) => Promise<void>;
+  closeOrder: (orderId: string, method: PaymentMethod) => Promise<Invoice>;
 }
 
-function nextOrderNumber(count: number) {
-  return `#${1026 + count}`;
-}
+export const useOrderStore = create<OrderStore>()((set, get) => ({
+  orders: [],
+  invoices: [],
+  loading: false,
+  fetchOrders: async () => {
+    set({ loading: true });
+    try {
+      const data = await apiFetch("/api/orders");
+      set({ orders: data, loading: false });
+    } catch (error) {
+      console.error("Failed to fetch orders:", error);
+      set({ loading: false });
+    }
+  },
+  fetchInvoices: async () => {
+    try {
+      const data = await apiFetch("/api/invoices");
+      set({ invoices: data });
+    } catch (error) {
+      console.error("Failed to fetch invoices:", error);
+    }
+  },
+  createOrder: async (tableId, guests) => {
+    try {
+      const order = await apiFetch("/api/orders", {
+        method: "POST",
+        body: JSON.stringify({ tableId, guests }),
+      });
+      set((state) => ({ orders: [...state.orders, order] }));
+      return order;
+    } catch (error) {
+      console.error("Failed to create order:", error);
+      throw error;
+    }
+  },
+  updateOrderItem: async (orderId, menuItem, qty) => {
+    const order = get().orders.find((o) => o.id === orderId);
+    if (!order) return;
 
-function recalculate(order: Order, items: OrderItem[]) {
-  return {
-    ...order,
-    items,
-    ...calculateOrder(items),
-  };
-}
+    // Build the updated order items list to sync
+    const withoutItem = order.items.filter((item) => item.menuItemId !== menuItem.id);
+    const updatedItems =
+      qty > 0
+        ? [
+            ...withoutItem,
+            {
+              menuItemId: menuItem.id,
+              name: menuItem.name,
+              price: Number(menuItem.price),
+              qty,
+            },
+          ]
+        : withoutItem;
 
-export const useOrderStore = create<OrderStore>()(
-  persist(
-    (set, get) => ({
-      orders: DEFAULT_ORDERS,
-      invoices: [],
-      createOrder: (tableId, guests) => {
-        const order: Order = {
-          id: `ord_${Date.now()}`,
-          tableId,
-          orderNo: nextOrderNumber(get().orders.length),
-          guests,
-          status: "open",
-          items: [],
-          subtotal: 0,
-          gstAmount: 0,
-          total: 0,
-          openedAt: new Date().toISOString(),
-        };
-        set((state) => ({ orders: [...state.orders, order] }));
-        return order;
-      },
-      updateOrderItem: (orderId, menuItem, qty) =>
-        set((state) => ({
-          orders: state.orders.map((order) => {
-            if (order.id !== orderId) {
-              return order;
-            }
+    try {
+      const updatedOrder = await apiFetch(`/api/orders/${orderId}/items`, {
+        method: "PUT",
+        body: JSON.stringify({ items: updatedItems }),
+      });
 
-            const withoutItem = order.items.filter((item) => item.menuItemId !== menuItem.id);
-            const items =
-              qty > 0
-                ? [
-                    ...withoutItem,
-                    {
-                      menuItemId: menuItem.id,
-                      name: menuItem.name,
-                      price: menuItem.price,
-                      qty,
-                    },
-                  ]
-                : withoutItem;
+      set((state) => ({
+        orders: state.orders.map((o) => (o.id === orderId ? updatedOrder : o)),
+      }));
+    } catch (error) {
+      console.error(`Failed to update order item for order ${orderId}:`, error);
+    }
+  },
+  generateBill: async (orderId) => {
+    try {
+      const updatedOrder = await apiFetch(`/api/orders/${orderId}/bill`, {
+        method: "POST",
+      });
+      set((state) => ({
+        orders: state.orders.map((o) => (o.id === orderId ? updatedOrder : o)),
+      }));
+    } catch (error) {
+      console.error(`Failed to generate bill for order ${orderId}:`, error);
+    }
+  },
+  closeOrder: async (orderId, method) => {
+    try {
+      const invoice = await apiFetch(`/api/orders/${orderId}/pay`, {
+        method: "POST",
+        body: JSON.stringify({ paymentMethod: method }),
+      });
 
-            return recalculate(order, items);
-          }),
-        })),
-      generateBill: (orderId) =>
-        set((state) => ({
-          orders: state.orders.map((order) => (order.id === orderId ? { ...order, status: "billed" } : order)),
-        })),
-      closeOrder: (orderId, method) => {
-        const order = get().orders.find((item) => item.id === orderId);
-        if (!order) {
-          throw new Error("Order not found");
-        }
+      set((state) => ({
+        invoices: [...state.invoices, invoice],
+        orders: state.orders.map((o) =>
+          o.id === orderId
+            ? {
+                ...o,
+                status: "paid",
+                paymentMethod: method,
+                closedAt: invoice.createdAt,
+              }
+            : o
+        ),
+      }));
 
-        const invoice: Invoice = {
-          id: `inv_${Date.now()}`,
-          orderId: order.id,
-          tableId: order.tableId,
-          orderNo: order.orderNo,
-          items: order.items,
-          subtotal: order.subtotal,
-          gstAmount: order.gstAmount,
-          total: order.total,
-          paymentMethod: method,
-          createdAt: new Date().toISOString(),
-        };
-
-        set((state) => ({
-          invoices: [...state.invoices, invoice],
-          orders: state.orders.map((item) =>
-            item.id === orderId
-              ? {
-                  ...item,
-                  status: "paid",
-                  paymentMethod: method,
-                  closedAt: invoice.createdAt,
-                }
-              : item,
-          ),
-        }));
-        return invoice;
-      },
-    }),
-    {
-      name: "pos-orders",
-      storage: createJSONStorage(() => AsyncStorage),
-    },
-  ),
-);
+      return invoice;
+    } catch (error) {
+      console.error(`Failed to close order ${orderId}:`, error);
+      throw error;
+    }
+  },
+}));

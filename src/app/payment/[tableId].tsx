@@ -33,12 +33,16 @@ export default function PaymentScreen() {
   const table = findTable(tableId);
   const order = getOrderForTable(tableId);
 
-  function confirmPayment() {
+  async function confirmPayment() {
     if (!order || !method) {
       return;
     }
-    const invoice = closeOrder(order.id, method);
-    router.replace(`/invoice/${invoice.orderId}` as never);
+    try {
+      const invoice = await closeOrder(order.id, method);
+      router.replace(`/invoice/${invoice.orderId}` as never);
+    } catch (e) {
+      console.error("Payment Confirmation Failed:", e);
+    }
   }
 
   if (!table || !order) {

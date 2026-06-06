@@ -1,15 +1,24 @@
-import { useCallback } from "react";
-
+import { useCallback, useEffect } from "react";
 import { useOrderStore } from "@/store/orderStore";
 import { useTableStore } from "@/store/tableStore";
 
 export function useTables() {
   const tables = useTableStore((state) => state.tables);
+  const fetchTables = useTableStore((state) => state.fetchTables);
   const setTableOrder = useTableStore((state) => state.setTableOrder);
   const setTableStatus = useTableStore((state) => state.setTableStatus);
   const clearTable = useTableStore((state) => state.clearTable);
   const orders = useOrderStore((state) => state.orders);
+  const fetchOrders = useOrderStore((state) => state.fetchOrders);
+  const fetchInvoices = useOrderStore((state) => state.fetchInvoices);
   const createOrder = useOrderStore((state) => state.createOrder);
+
+  // Sync tables, orders, and invoices from the REST backend
+  useEffect(() => {
+    fetchTables();
+    fetchOrders();
+    fetchInvoices();
+  }, [fetchTables, fetchOrders, fetchInvoices]);
 
   const findTable = useCallback((tableId: number) => tables.find((table) => table.id === tableId), [tables]);
 
@@ -25,17 +34,17 @@ export function useTables() {
   );
 
   const ensureOrderForTable = useCallback(
-    (tableId: number) => {
+    async (tableId: number) => {
       const currentOrder = getOrderForTable(tableId);
       if (currentOrder) {
         return currentOrder;
       }
 
-      const order = createOrder(tableId, 4);
-      setTableOrder(tableId, order.id);
+      // Backend createOrder automatically links table to the new order
+      const order = await createOrder(tableId, 4);
       return order;
     },
-    [createOrder, getOrderForTable, setTableOrder],
+    [createOrder, getOrderForTable],
   );
 
   return {

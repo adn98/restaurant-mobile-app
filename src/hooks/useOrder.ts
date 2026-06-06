@@ -1,8 +1,7 @@
 import { useCallback, useMemo } from "react";
-
 import { useOrderStore } from "@/store/orderStore";
 import { useTableStore } from "@/store/tableStore";
-import { PaymentMethod } from "@/types";
+import { PaymentMethod, MenuItem } from "@/types";
 
 export function useOrder(orderId?: string) {
   const orders = useOrderStore((state) => state.orders);
@@ -11,7 +10,6 @@ export function useOrder(orderId?: string) {
   const closeOrderInStore = useOrderStore((state) => state.closeOrder);
   const createOrder = useOrderStore((state) => state.createOrder);
   const tables = useTableStore((state) => state.tables);
-  const setTableOrder = useTableStore((state) => state.setTableOrder);
   const setTableStatus = useTableStore((state) => state.setTableStatus);
 
   const order = useMemo(
@@ -33,33 +31,32 @@ export function useOrder(orderId?: string) {
   );
 
   const ensureOrderForTable = useCallback(
-    (tableId: number) => {
+    async (tableId: number) => {
       const currentOrder = getOrderForTable(tableId);
       if (currentOrder) {
         return currentOrder;
       }
-      const newOrder = createOrder(tableId, 4);
-      setTableOrder(tableId, newOrder.id);
+      const newOrder = await createOrder(tableId, 4);
       return newOrder;
     },
-    [createOrder, getOrderForTable, setTableOrder],
+    [createOrder, getOrderForTable],
   );
 
   const generateBill = useCallback(
-    (targetOrderId: string) => {
-      generateBillInStore(targetOrderId);
+    async (targetOrderId: string) => {
+      await generateBillInStore(targetOrderId);
       const targetOrder = orders.find((item) => item.id === targetOrderId);
       if (targetOrder) {
-        setTableStatus(targetOrder.tableId, "bill");
+        await setTableStatus(targetOrder.tableId, "bill");
       }
     },
     [generateBillInStore, orders, setTableStatus],
   );
 
   const closeOrder = useCallback(
-    (targetOrderId: string, method: PaymentMethod) => {
-      const invoice = closeOrderInStore(targetOrderId, method);
-      setTableStatus(invoice.tableId, "paid");
+    async (targetOrderId: string, method: PaymentMethod) => {
+      const invoice = await closeOrderInStore(targetOrderId, method);
+      await setTableStatus(invoice.tableId, "paid");
       return invoice;
     },
     [closeOrderInStore, setTableStatus],

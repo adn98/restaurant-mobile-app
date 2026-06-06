@@ -1,28 +1,11 @@
-import { ScrollView, StyleSheet, Text, View } from "react-native";
+import { ScrollView, StyleSheet, Text, View, ActivityIndicator } from "react-native";
+import { useEffect, useState } from "react";
+import { useNavigation } from "expo-router";
 
 import { Card } from "@/components/ui/Card";
 import { COLORS } from "@/constants/colors";
-import { useOrder } from "@/hooks/useOrder";
 import { formatCurrency } from "@/utils/formatters";
-
-const WEEKLY_SALES = [
-  { label: "Mon", value: 8200 },
-  { label: "Tue", value: 9400 },
-  { label: "Wed", value: 11814 },
-  { label: "Thu", value: 10420 },
-  { label: "Fri", value: 14200 },
-  { label: "Sat", value: 18150 },
-  { label: "Sun", value: 15680 },
-];
-
-const MONTHLY_SALES = [
-  { label: "Jan", value: 186000 },
-  { label: "Feb", value: 204000 },
-  { label: "Mar", value: 198000 },
-  { label: "Apr", value: 232000 },
-  { label: "May", value: 251000 },
-  { label: "Jun", value: 278000 },
-];
+import { apiFetch } from "@/utils/api";
 
 function BarChart({
   title,
@@ -77,12 +60,49 @@ function MetricCard({ label, value, tone }: { label: string; value: string | num
 }
 
 export default function ReportsScreen() {
-  const { orders } = useOrder();
-  const sales = orders.reduce((sum, order) => sum + order.total, 0);
-  const paid = orders.filter((order) => order.status === "paid").length;
-  const active = orders.filter((order) => order.status !== "paid").length;
-  const averageTicket = orders.length ? Math.round(sales / orders.length) : 0;
-  const monthlyTotal = MONTHLY_SALES.reduce((sum, item) => sum + item.value, 0);
+  const [pulse, setPulse] = useState<{ activeOrders: number; paidBills: number; todaySales: number; averageTicket: number } | null>(null);
+  const [trends, setTrends] = useState<{ weekly: { label: string; value: number }[]; monthly: { label: string; value: number }[] } | null>(null);
+  const [loading, setLoading] = useState(true);
+  const navigation = useNavigation();
+
+  const loadReports = async () => {
+    try {
+      const [pulseData, trendsData] = await Promise.all([
+        apiFetch("/api/admin/reports/sales-pulse"),
+        apiFetch("/api/admin/reports/sales-trends"),
+      ]);
+      setPulse(pulseData);
+      setTrends(trendsData);
+    } catch (error) {
+      console.error("Failed to load reports from database:", error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    const unsubscribe = navigation.addListener("focus", () => {
+      loadReports();
+    });
+    loadReports();
+    return unsubscribe;
+  }, [navigation]);
+
+  if (loading) {
+    return (
+      <View style={[styles.screen, styles.centered]}>
+        <ActivityIndicator size="large" color={COLORS.primary} />
+      </View>
+    );
+  }
+
+  const sales = pulse?.todaySales ?? 0;
+  const paid = pulse?.paidBills ?? 0;
+  const active = pulse?.activeOrders ?? 0;
+  const averageTicket = Math.round(pulse?.averageTicket ?? 0);
+  const weeklySales = trends?.weekly ?? [];
+  const monthlySales = trends?.monthly ?? [];
+  const monthlyTotal = monthlySales.reduce((sum, item) => sum + item.value, 0);
 
   return (
     <ScrollView style={styles.screen} contentContainerStyle={styles.content} contentInsetAdjustmentBehavior="automatic">
@@ -93,7 +113,7 @@ export default function ReportsScreen() {
           <Text style={styles.heroSubtitle}>Weekly rhythm, monthly trend, and table velocity.</Text>
         </View>
         <View style={styles.heroBadge}>
-          <Text style={styles.heroBadgeValue}>{formatCurrency(sales || 11814)}</Text>
+          <Text style={styles.heroBadgeValue}>{formatCurrency(sales)}</Text>
           <Text style={styles.heroBadgeLabel}>today</Text>
         </View>
       </View>
@@ -108,14 +128,14 @@ export default function ReportsScreen() {
       <BarChart
         title="Weekly sales"
         subtitle="Current service week"
-        data={WEEKLY_SALES}
+        data={weeklySales}
         accent={COLORS.primary}
       />
 
       <BarChart
         title="Monthly sales"
         subtitle="6-month revenue trend"
-        data={MONTHLY_SALES}
+        data={monthlySales}
         accent={COLORS.blue}
         compact
       />
@@ -140,6 +160,10 @@ const styles = StyleSheet.create({
     gap: 14,
     padding: 18,
     paddingBottom: 34,
+  },
+  centered: {
+    justifyContent: "center",
+    alignItems: "center",
   },
   hero: {
     backgroundColor: COLORS.espresso,

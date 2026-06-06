@@ -1,15 +1,28 @@
-import { router, useLocalSearchParams } from "expo-router";
+import { router, useLocalSearchParams, useNavigation } from "expo-router";
 import { ScrollView, StyleSheet, View } from "react-native";
+import { useEffect } from "react";
 
 import { ThermalReceipt } from "@/components/invoice/ThermalReceipt";
 import { Button } from "@/components/ui/Button";
 import { useInvoice } from "@/hooks/useInvoice";
 import { useOrder } from "@/hooks/useOrder";
+import { useOrderStore } from "@/store/orderStore";
 
 export default function InvoiceScreen() {
   const { orderId } = useLocalSearchParams<{ orderId: string }>();
   const { invoice, settings, previewPrint } = useInvoice(orderId);
   const { findOrder } = useOrder();
+  const fetchInvoices = useOrderStore((state) => state.fetchInvoices);
+  const navigation = useNavigation();
+
+  useEffect(() => {
+    const unsubscribe = navigation.addListener("focus", () => {
+      fetchInvoices();
+    });
+    fetchInvoices();
+    return unsubscribe;
+  }, [navigation, fetchInvoices]);
+
   const order = orderId ? findOrder(orderId) : undefined;
   const fallbackInvoice =
     invoice ??

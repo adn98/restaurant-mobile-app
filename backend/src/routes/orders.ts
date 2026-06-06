@@ -1,7 +1,6 @@
 import { Router, Request, Response } from "express";
 import { PrismaClient, OrderStatus, TableStatus, PaymentMethod } from "@prisma/client";
 import { z } from "zod";
-import { apiKeyMiddleware } from "../middleware/apiKeyMiddleware";
 import { clientOrAdminAuth } from "../middleware/clientOrAdminAuth";
 import { transitionTableStatus } from "./tables";
 
@@ -135,7 +134,7 @@ router.get("/orders/:id", clientOrAdminAuth, async (req: Request, res: Response)
  *       201:
  *         description: Order opened successfully
  */
-router.post("/orders", apiKeyMiddleware, async (req: Request, res: Response) => {
+router.post("/orders", clientOrAdminAuth, async (req: Request, res: Response) => {
   try {
     const body = createOrderSchema.parse(req.body);
     const table = await prisma.table.findUnique({
@@ -242,7 +241,7 @@ router.post("/orders", apiKeyMiddleware, async (req: Request, res: Response) => 
  *       400:
  *         description: Order is not in 'open' or 'hold' status
  */
-router.put("/orders/:id/items", apiKeyMiddleware, async (req: Request, res: Response) => {
+router.put("/orders/:id/items", clientOrAdminAuth, async (req: Request, res: Response) => {
   const { id } = req.params;
 
   try {
@@ -340,7 +339,7 @@ router.put("/orders/:id/items", apiKeyMiddleware, async (req: Request, res: Resp
  *       200:
  *         description: Bill generated, status changed to 'billed'
  */
-router.post("/orders/:id/bill", apiKeyMiddleware, async (req: Request, res: Response) => {
+router.post("/orders/:id/bill", clientOrAdminAuth, async (req: Request, res: Response) => {
   const { id } = req.params;
 
   try {

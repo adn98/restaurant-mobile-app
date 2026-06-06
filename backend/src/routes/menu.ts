@@ -1,7 +1,7 @@
 import { Router, Request, Response } from "express";
 import { PrismaClient } from "@prisma/client";
 import { z } from "zod";
-import { apiKeyMiddleware } from "../middleware/apiKeyMiddleware";
+import { clientOrAdminAuth } from "../middleware/clientOrAdminAuth";
 import { adminAuthMiddleware, AuthenticatedRequest } from "../middleware/adminAuthMiddleware";
 
 const prisma = new PrismaClient();
@@ -44,7 +44,7 @@ function broadcastMenuUpdate(req: Request) {
  *       200:
  *         description: List of categories
  */
-router.get("/categories", apiKeyMiddleware, async (req: Request, res: Response) => {
+router.get("/categories", clientOrAdminAuth, async (req: Request, res: Response) => {
   try {
     const categories = await prisma.category.findMany({
       where: { isDeleted: false },
@@ -68,7 +68,7 @@ router.get("/categories", apiKeyMiddleware, async (req: Request, res: Response) 
  *       200:
  *         description: List of menu items
  */
-router.get("/menu", apiKeyMiddleware, async (req: Request, res: Response) => {
+router.get("/menu", clientOrAdminAuth, async (req: Request, res: Response) => {
   try {
     const menuItems = await prisma.menuItem.findMany({
       where: {

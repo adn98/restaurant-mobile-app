@@ -20,6 +20,7 @@ import { setupSwagger } from "./swagger";
 
 const prisma = new PrismaClient();
 const app = express();
+app.set("trust proxy", 1);
 const server = http.createServer(app);
 
 // Initialize Socket.IO
@@ -34,8 +35,20 @@ app.set("io", io);
 initTableTimers(io);
 
 // Global Middleware
+const allowedOrigins = [
+  process.env.CORS_ORIGIN,
+  "http://localhost:5173",
+  "http://localhost:8081",
+].filter(Boolean);
+
 app.use(cors({
-  origin: process.env.CORS_ORIGIN || "*",
+  origin: (origin, callback) => {
+    if (!origin || allowedOrigins.includes(origin) || allowedOrigins.includes("*")) {
+      callback(null, true);
+    } else {
+      callback(new Error("Not allowed by CORS"));
+    }
+  },
   credentials: true,
 }));
 app.use(express.json());
@@ -120,8 +133,25 @@ async function bootstrapAdmin() {
       });
       console.log(`Admin account bootstrapped: ${username}`);
     }
+
+    // Ensure order number sequence is initialized safely based on max existing order number
+    const maxValResult = await prisma.$queryRaw<any[]>`
+      SELECT MAX(NULLIF(regexp_replace(order_no, '[^0-9]', '', 'g'), '')::integer) as max_val FROM orders
+    `;
+    const maxVal = maxValResult[0]?.max_val;
+    const startVal = maxVal ? Math.max(1026, maxVal + 1) : 1026;
+
+    await prisma.$executeRawUnsafe(`
+      CREATE SEQUENCE IF NOT EXISTS order_no_seq START WITH ${startVal};
+    `);
+
+    // Align sequence value to startVal - 1 (or current last value if higher) to handle database restores or manual entries
+    await prisma.$executeRawUnsafe(`
+      SELECT setval('order_no_seq', GREATEST(COALESCE((SELECT last_value FROM pg_sequences WHERE sequencename = 'order_no_seq'), 1), ${startVal - 1}), true);
+    `);
+    console.log(`Order number sequence initialized and aligned (starts with ${startVal})`);
   } catch (error) {
-    console.error("Error bootstrapping admin account:", error);
+    console.error("Error bootstrapping admin account / DB sequence:", error);
   }
 }
 

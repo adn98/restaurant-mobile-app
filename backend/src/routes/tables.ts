@@ -28,45 +28,65 @@ const adminUpdateTableSchema = z.object({
 export const activeTimers = new Map<number, NodeJS.Timeout>();
 
 export async function transitionTableStatus(tableId: number, nextStatus: TableStatus, req?: Request) {
-  // Fetch table
-  const table = await prisma.table.findUnique({ where: { id: tableId } });
-  if (!table) throw new Error("Table not found");
+  // Perform everything in a transaction with row-level locking
+  const updatedTable = await prisma.$transaction(async (tx) => {
+    const lockedTables = await tx.$queryRaw<any[]>`
+      SELECT * FROM tables WHERE id = ${tableId} FOR UPDATE
+    `;
+    if (lockedTables.length === 0) {
+      throw new Error("Table not found");
+    }
+    const table = lockedTables[0];
+    const currentStatus = table.status as TableStatus;
+    
+    if (currentStatus === nextStatus) return table;
 
-  const currentStatus = table.status;
-  if (currentStatus === nextStatus) return table;
+    // Validate lifecycle transition
+    const ALLOWED_TRANSITIONS: Record<TableStatus, TableStatus[]> = {
+      empty: ["active"],
+      active: ["bill"],
+      bill: ["paid"],
+      paid: ["empty"]
+    };
 
-  // Validate lifecycle transition
-  const ALLOWED_TRANSITIONS: Record<TableStatus, TableStatus[]> = {
-    empty: ["active"],
-    active: ["bill"],
-    bill: ["paid"],
-    paid: ["empty"]
-  };
+    if (!ALLOWED_TRANSITIONS[currentStatus].includes(nextStatus)) {
+      throw new Error(`Invalid table status transition from ${currentStatus} to ${nextStatus}.`);
+    }
 
-  if (!ALLOWED_TRANSITIONS[currentStatus].includes(nextStatus)) {
-    throw new Error(`Invalid table status transition from ${currentStatus} to ${nextStatus}.`);
-  }
+    // Determine updates
+    let currentOrderId = table.currentOrderId;
+    if (nextStatus === TableStatus.empty) {
+      currentOrderId = null;
+    }
+
+    // Perform update
+    const updated = await tx.table.update({
+      where: { id: tableId },
+      data: {
+        status: nextStatus,
+        currentOrderId,
+      },
+    });
+
+    // Log transition to audit log
+    const authReq = req as AuthenticatedRequest | undefined;
+    await tx.auditLog.create({
+      data: {
+        adminId: authReq?.admin?.id || null,
+        action: `Table Status Changed: T${tableId} (${currentStatus} -> ${nextStatus})`,
+        entityType: "Table",
+        entityId: tableId.toString(),
+      },
+    });
+
+    return updated;
+  });
 
   // Clear any existing timer for this table if transitioning away from paid manually
   if (activeTimers.has(tableId)) {
     clearTimeout(activeTimers.get(tableId)!);
     activeTimers.delete(tableId);
   }
-
-  // Determine updates
-  let currentOrderId = table.currentOrderId;
-  if (nextStatus === TableStatus.empty) {
-    currentOrderId = null;
-  }
-
-  // Perform update
-  const updatedTable = await prisma.table.update({
-    where: { id: tableId },
-    data: {
-      status: nextStatus,
-      currentOrderId,
-    },
-  });
 
   // Schedule timer if nextStatus is paid
   if (nextStatus === TableStatus.paid) {
@@ -108,13 +128,7 @@ export async function initTableTimers(io?: any) {
 
       if (elapsedMs >= gracePeriodMs) {
         // Clear immediately
-        await prisma.table.update({
-          where: { id: table.id },
-          data: {
-            status: TableStatus.empty,
-            currentOrderId: null,
-          }
-        });
+        await transitionTableStatus(table.id, TableStatus.empty);
         console.log(`Auto-cleared table T${table.id} on startup (elapsed ${Math.round(elapsedMs / 1000)}s)`);
       } else {
         const remainingMs = gracePeriodMs - elapsedMs;
@@ -122,13 +136,7 @@ export async function initTableTimers(io?: any) {
         
         const timer = setTimeout(async () => {
           try {
-            await prisma.table.update({
-              where: { id: table.id },
-              data: {
-                status: TableStatus.empty,
-                currentOrderId: null,
-              }
-            });
+            await transitionTableStatus(table.id, TableStatus.empty);
             if (io) {
               io.emit("table-update");
               io.emit("order-update");
@@ -221,12 +229,29 @@ router.patch("/tables/:id", clientOrAdminAuth, async (req: Request, res: Respons
       return res.json(table);
     }
 
+    const originalTable = await prisma.table.findUnique({ where: { id: tableId } });
+    if (!originalTable) {
+      return res.status(404).json({ error: "Table not found" });
+    }
+
     const table = await prisma.table.update({
       where: { id: tableId },
       data: {
         ...(body.currentOrderId !== undefined && { currentOrderId: body.currentOrderId }),
       },
     });
+
+    if (body.currentOrderId !== undefined && body.currentOrderId !== originalTable.currentOrderId) {
+      const authReq = req as AuthenticatedRequest | undefined;
+      await prisma.auditLog.create({
+        data: {
+          adminId: authReq?.admin?.id || null,
+          action: `Table Order ID Updated: T${tableId} (${originalTable.currentOrderId || "None"} -> ${body.currentOrderId || "None"})`,
+          entityType: "Table",
+          entityId: tableId.toString(),
+        },
+      });
+    }
 
     broadcastTableUpdate(req);
     return res.json(table);

@@ -84,8 +84,15 @@ export default function ReportsScreen() {
     const unsubscribe = navigation.addListener("focus", () => {
       loadReports();
     });
-    loadReports();
-    return unsubscribe;
+    
+    const timer = setTimeout(() => {
+      loadReports();
+    }, 0);
+
+    return () => {
+      unsubscribe();
+      clearTimeout(timer);
+    };
   }, [navigation]);
 
   if (loading) {

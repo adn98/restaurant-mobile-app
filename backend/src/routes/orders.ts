@@ -137,24 +137,29 @@ router.get("/orders/:id", clientOrAdminAuth, async (req: Request, res: Response)
 router.post("/orders", clientOrAdminAuth, async (req: Request, res: Response) => {
   try {
     const body = createOrderSchema.parse(req.body);
-    const table = await prisma.table.findUnique({
-      where: { id: body.tableId },
-    });
 
-    if (!table) {
-      return res.status(400).json({ error: "Table not found" });
-    }
-
-    if (table.status !== TableStatus.empty) {
-      return res.status(400).json({ error: "Table is not empty. Cannot open a new order." });
-    }
-
-    // Generate unique order number (Count total orders + 1)
-    const count = await prisma.order.count();
-    const orderNo = `#${1026 + count}`;
-
-    // Create Order and Update Table status inside Transaction
+    // Create Order and Update Table status inside Transaction with Row Locking
     const order = await prisma.$transaction(async (tx) => {
+      // 1. Lock and retrieve the target table record
+      const lockedTables = await tx.$queryRaw<any[]>`
+        SELECT * FROM tables WHERE id = ${body.tableId} FOR UPDATE
+      `;
+
+      if (lockedTables.length === 0) {
+        throw new Error("Table not found");
+      }
+
+      const table = lockedTables[0];
+      if (table.status !== "empty") {
+        throw new Error("Table is not empty. Cannot open a new order.");
+      }
+
+      // Generate unique order number using atomic database sequence
+      const seqResult = await tx.$queryRaw<any[]>`
+        SELECT nextval('order_no_seq')::text as seq
+      `;
+      const orderNo = `#${seqResult[0].seq}`;
+
       const ord = await tx.order.create({
         data: {
           tableId: body.tableId,
@@ -175,6 +180,15 @@ router.post("/orders", clientOrAdminAuth, async (req: Request, res: Response) =>
         },
       });
 
+      // Write audit log for order creation
+      await tx.auditLog.create({
+        data: {
+          action: `Order ${orderNo} Opened for Table T${body.tableId} (${body.guests} guests)`,
+          entityType: "Order",
+          entityId: ord.id,
+        },
+      });
+
       return ord;
     });
 
@@ -182,9 +196,12 @@ router.post("/orders", clientOrAdminAuth, async (req: Request, res: Response) =>
     emitOrderUpdate(req);
 
     return res.status(201).json(order);
-  } catch (error) {
+  } catch (error: any) {
     if (error instanceof z.ZodError) {
       return res.status(400).json({ error: error.errors });
+    }
+    if (error instanceof Error && (error.message === "Table not found" || error.message.includes("is not empty"))) {
+      return res.status(400).json({ error: error.message });
     }
     console.error("Open Order Error:", error);
     return res.status(500).json({ error: "Internal Server Error" });
@@ -367,6 +384,15 @@ router.post("/orders/:id/bill", clientOrAdminAuth, async (req: Request, res: Res
           data: { status: TableStatus.bill },
         });
       }
+
+      // Write audit log for generating bill
+      await tx.auditLog.create({
+        data: {
+          action: `Bill Prepared for Order ${order.orderNo} (Table T${order.tableId})`,
+          entityType: "Order",
+          entityId: ord.id,
+        },
+      });
 
       return ord;
     });

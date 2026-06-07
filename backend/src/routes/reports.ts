@@ -79,31 +79,143 @@ router.put("/admin/settings", adminAuthMiddleware, async (req: Request, res: Res
       return res.status(404).json({ error: "Settings not found" });
     }
 
-    const updated = await prisma.setting.update({
-      where: { id: settings.id },
-      data: {
-        ...(body.restaurantName !== undefined && { restaurantName: body.restaurantName }),
-        ...(body.address !== undefined && { address: body.address }),
-        ...(body.gstNumber !== undefined && { gstNumber: body.gstNumber }),
-        ...(body.gstPercent !== undefined && { gstPercent: body.gstPercent }),
-        ...(body.currency !== undefined && { currency: body.currency }),
-        ...(body.tableCount !== undefined && { tableCount: body.tableCount }),
-      },
+    let tableCountChanged = false;
+    const updated = await prisma.$transaction(async (tx) => {
+      // Lock settings row to prevent race conditions with concurrent setting updates
+      const lockedSettings = await tx.$queryRaw<any[]>`
+        SELECT * FROM settings WHERE id = ${settings.id} FOR UPDATE
+      `;
+      if (lockedSettings.length === 0) {
+        throw new Error("Settings not found");
+      }
+      const currentSettings = lockedSettings[0];
+      const currentTableCount = currentSettings.table_count;
+
+      // 1. Update setting
+      const settingUpdate = await tx.setting.update({
+        where: { id: settings.id },
+        data: {
+          ...(body.restaurantName !== undefined && { restaurantName: body.restaurantName }),
+          ...(body.address !== undefined && { address: body.address }),
+          ...(body.gstNumber !== undefined && { gstNumber: body.gstNumber }),
+          ...(body.gstPercent !== undefined && { gstPercent: body.gstPercent }),
+          ...(body.currency !== undefined && { currency: body.currency }),
+          ...(body.tableCount !== undefined && { tableCount: body.tableCount }),
+        },
+      });
+
+      // 2. Adjust physical tables if needed comparing with actual database value inside lock
+      if (body.tableCount !== undefined && body.tableCount !== currentTableCount) {
+        tableCountChanged = true;
+        const newTableCount = body.tableCount;
+        const currentTables = await tx.table.findMany({
+          orderBy: { id: "asc" },
+        });
+        const currentCount = currentTables.length;
+
+        if (newTableCount > currentCount) {
+          const diff = newTableCount - currentCount;
+          let maxNum = 0;
+          for (const t of currentTables) {
+            const match = t.name.match(/^T(\d+)$/);
+            if (match) {
+              const num = parseInt(match[1], 10);
+              if (num > maxNum) maxNum = num;
+            }
+          }
+          if (maxNum === 0) maxNum = currentCount;
+
+          for (let i = 1; i <= diff; i++) {
+            const tableNum = maxNum + i;
+            const newTable = await tx.table.create({
+              data: {
+                name: `T${tableNum}`,
+                seats: 4,
+                status: "empty",
+              },
+            });
+
+            await tx.auditLog.create({
+              data: {
+                adminId: authReq.admin?.id,
+                action: `Table ${newTable.name} Created (Settings Adjustment)`,
+                entityType: "Table",
+                entityId: newTable.id.toString(),
+              },
+            });
+          }
+        } else if (newTableCount < currentCount) {
+          const tablesToDelete = currentTables.slice(newTableCount);
+          const tableIds = tablesToDelete.map((t) => t.id);
+
+          // Lock the tables we are about to delete using safe parameterized SQL
+          await tx.$queryRaw`
+            SELECT * FROM tables WHERE id = ANY(${tableIds}) FOR UPDATE
+          `;
+
+          // Re-read locked tables to get the absolute latest status post-lock acquisition
+          const lockedTables = await tx.table.findMany({
+            where: { id: { in: tableIds } },
+            orderBy: { id: "asc" },
+          });
+
+          // Check occupied tables inside the lock to prevent race conditions
+          const activeTables = lockedTables.filter(
+            (t) => t.status !== "empty" || t.currentOrderId !== null
+          );
+          if (activeTables.length > 0) {
+            throw new Error(
+              `Cannot reduce table count because the following tables are occupied: ${activeTables
+                .map((t) => t.name)
+                .join(", ")}. Please clear them first.`
+            );
+          }
+
+          for (const t of tablesToDelete) {
+            await tx.table.delete({
+              where: { id: t.id },
+            });
+
+            await tx.auditLog.create({
+              data: {
+                adminId: authReq.admin?.id,
+                action: `Table ${t.name} Deleted (Settings Adjustment)`,
+                entityType: "Table",
+                entityId: t.id.toString(),
+              },
+            });
+          }
+        }
+      }
+
+      // 3. Log settings update
+      await tx.auditLog.create({
+        data: {
+          adminId: authReq.admin?.id,
+          action: `Restaurant Settings Updated: ${Object.keys(body).join(", ")}`,
+          entityType: "Settings",
+          entityId: settings.id.toString(),
+        },
+      });
+
+      return settingUpdate;
     });
 
-    await prisma.auditLog.create({
-      data: {
-        adminId: authReq.admin?.id,
-        action: `Restaurant Settings Updated: ${Object.keys(body).join(", ")}`,
-        entityType: "Settings",
-        entityId: settings.id.toString(),
-      },
-    });
+    // 4. Broadcast updates via Socket.IO
+    if (tableCountChanged) {
+      const io = req.app.get("io");
+      if (io) {
+        io.emit("table-update");
+      }
+    }
 
     return res.json(updated);
-  } catch (error) {
+  } catch (error: any) {
     if (error instanceof z.ZodError) {
       return res.status(400).json({ error: error.errors });
+    }
+    if (error instanceof Error && error.message.includes("Cannot reduce table count")) {
+      return res.status(400).json({ error: error.message });
     }
     console.error("Update Settings Error:", error);
     return res.status(500).json({ error: "Internal Server Error" });
@@ -539,7 +651,7 @@ router.get("/admin/reports/analytics", adminAuthMiddleware, async (req: Request,
  *       200:
  *         description: List of audit records
  */
-router.get("/api/admin/reports/audit-logs", adminAuthMiddleware, async (req: Request, res: Response) => {
+router.get("/admin/reports/audit-logs", adminAuthMiddleware, async (req: Request, res: Response) => {
   try {
     const logs = await prisma.auditLog.findMany({
       include: {
@@ -568,7 +680,7 @@ router.get("/api/admin/reports/audit-logs", adminAuthMiddleware, async (req: Req
  *       200:
  *         description: List of invoice logs
  */
-router.get("/api/admin/invoices", adminAuthMiddleware, async (req: Request, res: Response) => {
+router.get("/admin/invoices", adminAuthMiddleware, async (req: Request, res: Response) => {
   try {
     const invoices = await prisma.invoice.findMany({
       include: { items: true },

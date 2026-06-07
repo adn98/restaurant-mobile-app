@@ -1885,103 +1885,52 @@ function InvoicesView({ fetchWithAuth }: { fetchWithAuth: any }) {
 // 5. ANALYTICS VIEW
 function AnalyticsView({ fetchWithAuth }: { fetchWithAuth: any }) {
   const [trends, setTrends] = useState<any>({ weekly: [], monthly: [] });
-  const [dailyClose, setDailyClose] = useState<any>({ sales: 0, breakdown: { cash: 0, upi: 0, card: 0, credit: 0 }, orderCount: 0 });
-  const [invoices, setInvoices] = useState<any[]>([]);
-  const [openOrders, setOpenOrders] = useState<any[]>([]);
+  const [analyticsData, setAnalyticsData] = useState<any | null>(null);
+  const [loading, setLoading] = useState(true);
 
   const loadData = async () => {
+    setLoading(true);
     try {
       const trendsRes = await fetchWithAuth("/api/admin/reports/sales-trends");
       if (trendsRes.ok) setTrends(await trendsRes.json());
 
-      const closeRes = await fetchWithAuth("/api/admin/reports/daily-close");
-      if (closeRes.ok) setDailyClose(await closeRes.json());
-
-      const invRes = await fetchWithAuth("/api/invoices");
-      if (invRes.ok) setInvoices(await invRes.json());
-
-      const ordRes = await fetchWithAuth("/api/orders");
-      if (ordRes.ok) {
-        const allOrders = await ordRes.json();
-        setOpenOrders(allOrders.filter((o: any) => o.status !== "paid"));
-      }
+      const analyticsRes = await fetchWithAuth("/api/admin/reports/analytics");
+      if (analyticsRes.ok) setAnalyticsData(await analyticsRes.json());
     } catch (e) {
       console.error("Failed to load analytics data:", e);
+    } finally {
+      setLoading(false);
     }
   };
 
   useEffect(() => { loadData(); }, []);
 
+  if (loading || !analyticsData) {
+    return <div style={{ color: "var(--text-muted)", padding: "40px", textAlign: "center" }}>Loading aggregated analytics...</div>;
+  }
+
   const maxWeekly = Math.max(...trends.weekly.map((d: any) => d.value), 1);
-
-  // Compute Top Selling Items (from paid invoices)
-  const computeTopSellingItems = () => {
-    const counts: Record<string, number> = {};
-    invoices.forEach(inv => {
-      inv.items?.forEach((it: any) => {
-        counts[it.name] = (counts[it.name] || 0) + it.qty;
-      });
-    });
-    return Object.entries(counts)
-      .map(([name, qty]) => ({ name, qty }))
-      .sort((a, b) => b.qty - a.qty)
-      .slice(0, 5);
-  };
-
-  const topSellingItems = computeTopSellingItems();
-  const maxSellingQty = Math.max(...topSellingItems.map(item => item.qty), 1);
-
-  // Compute Order Velocity for Today
-  const computeOrderVelocity = () => {
-    const hourlyCounts = Array(24).fill(0);
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    
-    // Count both open orders and invoices created today
-    const todayOrders = [
-      ...openOrders.map(o => ({ openedAt: o.openedAt })),
-      ...invoices.filter(inv => new Date(inv.createdAt) >= today).map(inv => ({ openedAt: inv.createdAt }))
-    ];
-    
-    todayOrders.forEach((o: any) => {
-      const hour = new Date(o.openedAt).getHours();
-      if (hour >= 0 && hour < 24) {
-        hourlyCounts[hour]++;
-      }
-    });
-
-    const totalTodayOrders = todayOrders.length;
-    const currentHour = new Date().getHours() + 1; // avoid division by zero
-    const averagePerHour = Number((totalTodayOrders / currentHour).toFixed(1));
-    
-    return {
-      hourlyCounts,
-      averagePerHour,
-      totalTodayOrders
-    };
-  };
-
-  const velocity = computeOrderVelocity();
+  const topSellingItems = analyticsData.topSellingItems || [];
+  const maxSellingQty = Math.max(...topSellingItems.map((item: any) => item.qty), 1);
+  const velocity = analyticsData.velocity || { hourlyCounts: Array(24).fill(0), averagePerHour: 0, totalTodayOrders: 0 };
   const maxHourlyCount = Math.max(...velocity.hourlyCounts, 1);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "24px" }}>
-      {/* 4 Analytics Stat Cards */}
+      {/* 4 Financial Analytics Stat Cards */}
       <div className="stats-grid">
         <div className="card stat-card primary">
           <div className="stat-icon"><DollarSign size={24} /></div>
           <div>
             <div className="stat-title">Revenue Today</div>
-            <div className="stat-value">₹{dailyClose.sales.toLocaleString("en-IN")}</div>
+            <div className="stat-value">₹{analyticsData.revenueToday.toLocaleString("en-IN")}</div>
           </div>
         </div>
         <div className="card stat-card">
           <div className="stat-icon"><TrendingUp size={24} /></div>
           <div>
             <div className="stat-title">Avg Ticket Size</div>
-            <div className="stat-value">
-              ₹{dailyClose.orderCount > 0 ? Math.round(dailyClose.sales / dailyClose.orderCount).toLocaleString("en-IN") : 0}
-            </div>
+            <div className="stat-value">₹{Math.round(analyticsData.averageTicket).toLocaleString("en-IN")}</div>
           </div>
         </div>
         <div className="card stat-card blue">
@@ -2000,13 +1949,49 @@ function AnalyticsView({ fetchWithAuth }: { fetchWithAuth: any }) {
         </div>
       </div>
 
+      {/* Operational Insights */}
+      <div className="section-header" style={{ marginTop: "12px" }}>
+        <h4 className="section-title">Operational Insights</h4>
+      </div>
+      <div className="stats-grid">
+        <div className="card stat-card green">
+          <div className="stat-icon"><CheckSquare size={24} /></div>
+          <div>
+            <div className="stat-title">Active Tables</div>
+            <div className="stat-value">{analyticsData.activeTables} tables</div>
+          </div>
+        </div>
+        <div className="card stat-card blue">
+          <div className="stat-icon"><Coffee size={24} /></div>
+          <div>
+            <div className="stat-title">Occupied Tables</div>
+            <div className="stat-value">{analyticsData.occupiedTables} tables</div>
+          </div>
+        </div>
+        <div className="card stat-card primary">
+          <div className="stat-icon"><Users size={24} /></div>
+          <div>
+            <div className="stat-title">Avg Guests / Order</div>
+            <div className="stat-value">{Number(analyticsData.averageGuests).toFixed(1)} guests</div>
+          </div>
+        </div>
+        <div className="card stat-card">
+          <div className="stat-icon"><TrendingUp size={24} /></div>
+          <div>
+            <div className="stat-title">Popular Category</div>
+            <div className="stat-value" style={{ fontSize: "16px", marginTop: "8px" }}>{analyticsData.mostPopularCategory}</div>
+          </div>
+        </div>
+      </div>
+
       <div style={{ display: "flex", gap: "24px", flexDirection: "row", flexWrap: "wrap" }}>
         {/* Payment Method Distribution Card */}
         <div className="card" style={{ flex: 1.2, minWidth: "320px" }}>
           <h4 style={{ marginBottom: "20px" }}>Payment Method Distribution</h4>
           <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
-            {Object.entries(dailyClose.breakdown).map(([method, amount]: [string, any]) => {
-              const pct = dailyClose.sales > 0 ? (amount / dailyClose.sales) * 100 : 0;
+            {Object.entries(analyticsData.paymentDistribution).map(([method, data]: [string, any]) => {
+              const amount = data.amount || 0;
+              const pct = data.percentage || 0;
               return (
                 <div key={method}>
                   <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "6px", fontSize: "13px" }}>
@@ -2029,7 +2014,7 @@ function AnalyticsView({ fetchWithAuth }: { fetchWithAuth: any }) {
             {topSellingItems.length === 0 ? (
               <div style={{ color: "var(--text-muted)", fontSize: "13px", padding: "10px 0" }}>No items sold today.</div>
             ) : (
-              topSellingItems.map((item) => {
+              topSellingItems.map((item: any) => {
                 const pct = (item.qty / maxSellingQty) * 100;
                 return (
                   <div key={item.name}>
@@ -2055,7 +2040,7 @@ function AnalyticsView({ fetchWithAuth }: { fetchWithAuth: any }) {
           Visualizing the volume of orders processed per hour. Current average is <strong style={{ color: "var(--text-main)" }}>{velocity.averagePerHour} orders/hr</strong>.
         </p>
         <div style={{ display: "flex", alignItems: "flex-end", gap: "6px", height: "150px", overflowX: "auto", paddingBottom: "10px", borderBottom: "1px solid var(--border-color)" }}>
-          {velocity.hourlyCounts.map((count, hr) => {
+          {velocity.hourlyCounts.map((count: number, hr: number) => {
             const heightPct = `${(count / maxHourlyCount) * 85}%`;
             return (
               <div key={hr} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", minWidth: "16px", height: "100%", justifyContent: "flex-end" }}>

@@ -14,6 +14,6 @@ export const DEFAULT_SETTINGS: AppSettings = {
   tableCount: 12,
 };
 
-export const API_BASE = "http://localhost:3000"; // Replace with your live AWS IP (e.g. http://3.110.217.72) or hostname in production
+export const API_BASE = process.env.EXPO_PUBLIC_API_URL || "http://localhost:3000";
 export const MOBILE_APP_API_KEY = "pos-mobile-app-traffic-filter-key-123-abc";
 

@@ -249,7 +249,23 @@ router.get("/admin/reports/daily-close", clientOrAdminAuth, async (req: Request,
     const today = new Date();
     today.setHours(0, 0, 0, 0);
 
-    const invoices = await prisma.invoice.findMany({
+    const totalSalesQuery = await prisma.invoice.aggregate({
+      _sum: {
+        total: true,
+      },
+      _count: {
+        id: true,
+      },
+      where: {
+        createdAt: { gte: today },
+      },
+    });
+
+    const breakdownQuery = await prisma.invoice.groupBy({
+      by: ["paymentMethod"],
+      _sum: {
+        total: true,
+      },
       where: {
         createdAt: { gte: today },
       },
@@ -262,23 +278,252 @@ router.get("/admin/reports/daily-close", clientOrAdminAuth, async (req: Request,
       credit: 0,
     };
 
-    let totalSales = 0;
-    invoices.forEach((inv) => {
-      const amount = Number(inv.total);
-      totalSales += amount;
-      if (inv.paymentMethod === PaymentMethod.cash) breakdown.cash += amount;
-      else if (inv.paymentMethod === PaymentMethod.upi) breakdown.upi += amount;
-      else if (inv.paymentMethod === PaymentMethod.card) breakdown.card += amount;
-      else if (inv.paymentMethod === PaymentMethod.credit) breakdown.credit += amount;
+    breakdownQuery.forEach((group) => {
+      const method = group.paymentMethod.toLowerCase() as keyof typeof breakdown;
+      if (method in breakdown) {
+        breakdown[method] = Number(group._sum.total || 0);
+      }
     });
 
     return res.json({
-      sales: totalSales,
+      sales: Number(totalSalesQuery._sum.total || 0),
       breakdown,
-      orderCount: invoices.length,
+      orderCount: totalSalesQuery._count.id,
     });
   } catch (error) {
     console.error("Daily Close Error:", error);
+    return res.status(500).json({ error: "Internal Server Error" });
+  }
+});
+
+/**
+ * @openapi
+ * /api/admin/reports/analytics:
+ *   get:
+ *     summary: Aggregated Restaurant Operations Analytics (Admin Only)
+ *     security:
+ *       - BearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Consolidated operational metrics
+ */
+router.get("/admin/reports/analytics", adminAuthMiddleware, async (req: Request, res: Response) => {
+  try {
+    const startOfDay = new Date();
+    startOfDay.setHours(0, 0, 0, 0);
+
+    // 1. Revenue Today
+    const revenueTodayQuery = await prisma.invoice.aggregate({
+      _sum: {
+        total: true,
+      },
+      where: {
+        createdAt: {
+          gte: startOfDay,
+        },
+      },
+    });
+    const revenueToday = Number(revenueTodayQuery._sum.total || 0);
+
+    // 2. Average Ticket Size (Today's Invoices)
+    const avgTicketQuery = await prisma.invoice.aggregate({
+      _avg: {
+        total: true,
+      },
+      where: {
+        createdAt: {
+          gte: startOfDay,
+        },
+      },
+    });
+    const averageTicket = Number(avgTicketQuery._avg.total || 0);
+
+    // 3. Orders Today
+    const ordersToday = await prisma.order.count({
+      where: {
+        openedAt: {
+          gte: startOfDay,
+        },
+      },
+    });
+
+    // 4. Payment Method Distribution
+    const paymentDistribution = await prisma.invoice.groupBy({
+      by: ["paymentMethod"],
+      _count: {
+        id: true,
+      },
+      _sum: {
+        total: true,
+      },
+      where: {
+        createdAt: {
+          gte: startOfDay,
+        },
+      },
+    });
+
+    const totalTodaySales = paymentDistribution.reduce((sum, item) => sum + Number(item._sum.total || 0), 0);
+
+    const formattedDistribution = {
+      cash: { count: 0, amount: 0, percentage: 0 },
+      upi: { count: 0, amount: 0, percentage: 0 },
+      card: { count: 0, amount: 0, percentage: 0 },
+      credit: { count: 0, amount: 0, percentage: 0 },
+    };
+
+    paymentDistribution.forEach(item => {
+      const method = item.paymentMethod.toLowerCase() as keyof typeof formattedDistribution;
+      if (method in formattedDistribution) {
+        const amount = Number(item._sum.total || 0);
+        const count = item._count.id;
+        const percentage = totalTodaySales > 0 ? (amount / totalTodaySales) * 100 : 0;
+        formattedDistribution[method] = { count, amount, percentage };
+      }
+    });
+
+    // 5. Top Selling Items
+    const topSellingQuery = await prisma.invoiceItem.groupBy({
+      by: ["name"],
+      _sum: {
+        qty: true,
+      },
+      where: {
+        invoice: {
+          createdAt: {
+            gte: startOfDay,
+          },
+        },
+      },
+      orderBy: {
+        _sum: {
+          qty: "desc",
+        },
+      },
+      take: 5,
+    });
+
+    const topSellingItems = topSellingQuery.map(item => ({
+      name: item.name,
+      qty: item._sum.qty || 0,
+    }));
+
+    // 6. Order Velocity
+    const todayOrders = await prisma.order.findMany({
+      where: {
+        openedAt: {
+          gte: startOfDay,
+        },
+      },
+      select: {
+        openedAt: true,
+      },
+    });
+
+    const hourlyCounts = Array(24).fill(0);
+    todayOrders.forEach(o => {
+      const hour = new Date(o.openedAt).getHours();
+      if (hour >= 0 && hour < 24) {
+        hourlyCounts[hour]++;
+      }
+    });
+
+    const totalTodayOrders = todayOrders.length;
+    const currentHour = new Date().getHours() + 1;
+    const averagePerHour = Number((totalTodayOrders / currentHour).toFixed(1));
+
+    const velocity = {
+      hourlyCounts,
+      averagePerHour,
+      totalTodayOrders,
+    };
+
+    // 7. Active Tables
+    const activeTables = await prisma.table.count({
+      where: {
+        status: "active",
+      },
+    });
+
+    // 8. Occupied Tables
+    const occupiedTables = await prisma.table.count({
+      where: {
+        status: {
+          not: "empty",
+        },
+      },
+    });
+
+    // 9. Average Guests Per Order
+    const avgGuestsQuery = await prisma.order.aggregate({
+      _avg: {
+        guests: true,
+      },
+    });
+    const averageGuests = Number(avgGuestsQuery._avg.guests || 0);
+
+    // 10. Most Popular Category (Two-stage aggregation with startOfDay filter)
+    const itemSales = await prisma.invoiceItem.groupBy({
+      by: ["menuItemId"],
+      _sum: {
+        qty: true,
+      },
+      where: {
+        menuItemId: { not: null },
+        invoice: {
+          createdAt: {
+            gte: startOfDay,
+          },
+        },
+      },
+    });
+
+    const itemsWithCategories = await prisma.menuItem.findMany({
+      select: {
+        id: true,
+        category: {
+          select: {
+            name: true,
+          },
+        },
+      },
+    });
+
+    const categorySales: Record<string, number> = {};
+    const itemIdToCategoryName = new Map(itemsWithCategories.map(item => [item.id, item.category.name]));
+
+    itemSales.forEach(sale => {
+      if (sale.menuItemId) {
+        const catName = itemIdToCategoryName.get(sale.menuItemId);
+        if (catName) {
+          categorySales[catName] = (categorySales[catName] || 0) + Number(sale._sum.qty || 0);
+        }
+      }
+    });
+
+    let mostPopularCategory = "N/A";
+    let maxSalesVolume = 0;
+    Object.entries(categorySales).forEach(([catName, volume]) => {
+      if (volume > maxSalesVolume) {
+        maxSalesVolume = volume;
+        mostPopularCategory = catName;
+      }
+    });
+
+    return res.json({
+      revenueToday,
+      averageTicket,
+      ordersToday,
+      paymentDistribution: formattedDistribution,
+      topSellingItems,
+      velocity,
+      activeTables,
+      occupiedTables,
+      averageGuests,
+      mostPopularCategory,
+    });
+  } catch (error) {
+    console.error("Fetch Analytics Error:", error);
     return res.status(500).json({ error: "Internal Server Error" });
   }
 });

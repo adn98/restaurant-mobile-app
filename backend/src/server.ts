@@ -150,6 +150,18 @@ async function bootstrapAdmin() {
       SELECT setval('order_no_seq', GREATEST(COALESCE((SELECT last_value FROM pg_sequences WHERE sequencename = 'order_no_seq'), 1), ${startVal - 1}), true);
     `);
     console.log(`Order number sequence initialized and aligned (starts with ${startVal})`);
+
+    // Ensure tables ID sequence is aligned with the maximum table ID to prevent primary key conflicts on table creation
+    const maxTableIdResult = await prisma.$queryRaw<any[]>`
+      SELECT MAX(id) as max_val FROM tables
+    `;
+    const maxTableId = maxTableIdResult[0]?.max_val;
+    if (maxTableId) {
+      await prisma.$executeRawUnsafe(`
+        SELECT setval('tables_id_seq', ${maxTableId});
+      `);
+      console.log(`Tables sequence aligned to ${maxTableId}`);
+    }
   } catch (error) {
     console.error("Error bootstrapping admin account / DB sequence:", error);
   }
